@@ -176,13 +176,15 @@ Private Sub AssignSlotsGlobally(ByRef slots() As ScheduleSlot, ByVal slotCount A
                                 ByVal lastAssigned As Object, ByVal pairCounts As Object)
     Dim assigned As Long, bestSlot As Long, bestMechanic As String
     Dim candidateSlot As Long, candidate As Variant, score As Double, bestScore As Double
+    Dim targetDate As Date
 
     For assigned = 1 To slotCount
         bestScore = 1E+30
         bestSlot = 0
         bestMechanic = vbNullString
+        targetDate = NextUnassignedDate(slots, slotCount)
         For candidateSlot = 1 To slotCount
-            If Len(slots(candidateSlot).Mechanic) = 0 Then
+            If Len(slots(candidateSlot).Mechanic) = 0 And slots(candidateSlot).ScheduleDate = targetDate Then
                 For Each candidate In eligible
                     If IsEligibleForSlot(CStr(candidate), slots(candidateSlot), slots, slotCount) Then
                         score = AssignmentScore(CStr(candidate), slots(candidateSlot), slots, slotCount, _
@@ -485,6 +487,19 @@ Private Function CollectEmptyFutureSlots(ByRef slots() As ScheduleSlot) As Long
         End If
     Next row
     CollectEmptyFutureSlots = count
+End Function
+
+' Initial allocation follows chronological schedule dates so "time since last
+' assignment" is meaningful. The subsequent ImproveSchedule pass evaluates the
+' completed plan across every generated date.
+Private Function NextUnassignedDate(ByRef slots() As ScheduleSlot, ByVal slotCount As Long) As Date
+    Dim index As Long, earliest As Date
+    For index = 1 To slotCount
+        If Len(slots(index).Mechanic) = 0 Then
+            If earliest = 0 Or slots(index).ScheduleDate < earliest Then earliest = slots(index).ScheduleDate
+        End If
+    Next index
+    NextUnassignedDate = earliest
 End Function
 
 Private Function IsUnavailable(ByVal mechanic As String, ByVal scheduleDate As Date) As Boolean
