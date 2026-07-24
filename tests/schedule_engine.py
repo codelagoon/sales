@@ -38,6 +38,7 @@ class Slot:
     table_row: int
     table_column: int
     mechanic: str = ""
+    note: str = ""
 
 
 @dataclass
@@ -46,6 +47,7 @@ class HistoryRow:
     location: str
     mechanic: str
     created_on: object = None
+    note: str = ""
 
 
 @dataclass
@@ -120,6 +122,10 @@ def assign_future_schedule(wb: Workbook, today: date, recent_cutoff: Optional[da
             "At least four active mechanics are required "
             "(two locations x two mechanics per schedule date).")
 
+    # Operational safeguard: refuse to run if any generated date cannot be
+    # staffed with enough active, available mechanics.
+    check_active_staff_threshold(wb, today)
+
     slots = _collect_empty_future_slots(wb, today)
     if not slots:
         return []
@@ -137,8 +143,33 @@ def assign_future_schedule(wb: Workbook, today: date, recent_cutoff: Optional[da
                            location_counts, last_assigned, pair_counts, wb)
     _improve_schedule(slots, eligible, wb)
     _write_slots_to_schedule(wb, slots)
-    _append_schedule_to_history(wb, slots)
+    _commit_assignment_to_history(wb, slots)
     return slots
+
+
+def check_active_staff_threshold(wb: Workbook, today: date) -> None:
+    """Abort with a clear message if any future date lacks enough available staff.
+
+    Every empty location cell needs two mechanics, so a fully empty date needs
+    four distinct active mechanics who are not marked unavailable that day.
+    """
+    eligible = active_mechanics(wb)
+    for row in wb.schedule:
+        d = row.get("date")
+        if not _is_future(d, today):
+            continue
+        needed = 0
+        for colname in (LOCATION_ONE, LOCATION_TWO):
+            if _blank(row.get(colname)):
+                needed += 2
+        if needed == 0:
+            continue
+        available = [m for m in eligible if not _is_unavailable(wb, m, d)]
+        if len(available) < needed:
+            raise ValueError(
+                f"Only {len(available)} active, available mechanic(s) on "
+                f"{d:%m/%d/%Y}; {needed} are required. Add active mechanics or "
+                f"remove availability blocks for that date, then try again.")
 
 
 def _assign_slots_globally(slots, eligible, total_counts, recent_counts, location_counts,
@@ -161,6 +192,14 @@ def _assign_slots_globally(slots, eligible, total_counts, recent_counts, locatio
                             best_mechanic = candidate
         if best_slot is None:
             raise ValueError("No eligible mechanic is available for every future schedule date.")
+        # Explicit duplicate-assignment guard: never place a mechanic at both
+        # buildings on the same date (defensive; scoring already avoids it).
+        if _creates_same_day_duplicate(best_mechanic, slots.index(best_slot), slots):
+            raise ValueError(
+                f"{best_mechanic} would be assigned twice on {best_slot.schedule_date:%m/%d/%Y}.")
+        best_slot.note = _build_selection_note(best_mechanic, best_slot, total_counts,
+                                               recent_counts, location_counts, last_assigned,
+                                               pair_counts, slots)
         best_slot.mechanic = best_mechanic
         _apply_temporary_assignment(best_mechanic, best_slot, total_counts, recent_counts,
                                     location_counts, last_assigned, pair_counts, slots)
@@ -278,15 +317,35 @@ def _write_slots_to_schedule(wb, slots) -> None:
             row[colname] = value
 
 
-def _append_schedule_to_history(wb, slots) -> None:
+def _commit_assignment_to_history(wb, slots) -> None:
+    """Append new assignments to permanent history with an audit note that
+    records why each mechanic was selected."""
     existing = set()
     for h in wb.history:
         existing.add(f"{_date_key(h.date)}|{h.location}|{h.mechanic}")
     for s in slots:
         key = f"{_date_key(s.schedule_date)}|{s.location}|{s.mechanic}"
         if key not in existing:
-            wb.history.append(HistoryRow(s.schedule_date, s.location, s.mechanic, "now"))
+            wb.history.append(HistoryRow(s.schedule_date, s.location, s.mechanic, "now", s.note))
             existing.add(key)
+
+
+def _build_selection_note(mechanic, slot, total_counts, recent_counts, location_counts,
+                          last_assigned, pair_counts, slots) -> str:
+    """Short audit tag explaining why this mechanic won the slot."""
+    lifetime = total_counts[mechanic]
+    recent = recent_counts[mechanic]
+    last = last_assigned[mechanic]
+    idle = "new" if last <= date(1900, 1, 1) else f"{max(0, (slot.schedule_date - last).days)}d"
+    partner = _assigned_partner(slot, slots)
+    if partner:
+        repeats = pair_counts.get(_pair_key(mechanic, partner), 0)
+        pair_txt = f"new pairing w/ {partner}" if repeats == 0 else f"paired w/ {partner} x{repeats}"
+    else:
+        pair_txt = "pairing pending"
+    loc_gap = _location_imbalance_after(mechanic, slot.location, location_counts)
+    return (f"lifetime {lifetime}, recent {recent}, idle {idle}, "
+            f"{pair_txt}, loc-gap {loc_gap}")
 
 
 # --- statistics (mirror the History* helpers) --------------------------------
@@ -470,3 +529,91 @@ def _add_months(d: date, months: int) -> date:
     day = min(d.day, [31, 29 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 28,
                       31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1])
     return date(year, month, day)
+
+
+# --- transparency: fairness summary + verification --------------------------
+
+
+def fairness_summary(wb: Workbook) -> dict:
+    """Statistical analysis of workload spread across active mechanics, computed
+    live from the History sheet."""
+    eligible = active_mechanics(wb)
+    counts = _lifetime_counts(wb, eligible)
+    values = list(counts.values())
+    total = sum(values)
+    if values:
+        gap = max(values) - min(values)
+        mean = total / len(values)
+        stdev = (sum((v - mean) ** 2 for v in values) / len(values)) ** 0.5
+    else:
+        gap = 0
+        stdev = 0.0
+    return {
+        "active_mechanics": len(eligible),
+        "total_assignments": total,
+        "gap": gap,          # busiest minus least-busy
+        "stdev": round(stdev, 3),  # spread of workload (statistical analysis)
+    }
+
+
+def verify_generated_schedule(wb: Workbook, today: date) -> dict:
+    """Post-generation work verification. Confirms:
+      1. zero duplicate mechanics on the same date,
+      2. zero unavailable/inactive mechanics scheduled,
+      3. all future uncompleted rows filled.
+    Returns a structured report plus a human-readable log.
+    """
+    active = set(active_mechanics(wb))
+    duplicate_dates = []
+    illegal = []          # (date, location, mechanic, reason)
+    unfilled_rows = []
+
+    for row in wb.schedule:
+        d = row.get("date")
+        if not _is_future(d, today):
+            continue
+        people_today = []
+        for colname in (LOCATION_ONE, LOCATION_TWO):
+            cell = str(row.get(colname) or "").strip()
+            if cell == "":
+                unfilled_rows.append((d, colname))
+                continue
+            names = [p.strip() for p in cell.split("/") if p.strip()]
+            people_today.extend(names)
+            for name in names:
+                if name not in active:
+                    illegal.append((d, colname, name, "inactive"))
+                elif _is_unavailable(wb, name, d):
+                    illegal.append((d, colname, name, "unavailable"))
+        if len(people_today) != len(set(people_today)):
+            duplicate_dates.append(d)
+
+    report = {
+        "duplicates_ok": len(duplicate_dates) == 0,
+        "duplicate_dates": duplicate_dates,
+        "no_illegal_ok": len(illegal) == 0,
+        "illegal_assignments": illegal,
+        "all_filled_ok": len(unfilled_rows) == 0,
+        "unfilled_rows": unfilled_rows,
+    }
+    report["all_passed"] = (report["duplicates_ok"] and report["no_illegal_ok"]
+                            and report["all_filled_ok"])
+    report["log"] = (
+        "Verification results:\n"
+        f"  1. No duplicate mechanic on a date: {'PASS' if report['duplicates_ok'] else 'FAIL (' + str(len(duplicate_dates)) + ')'}\n"
+        f"  2. No inactive/unavailable scheduled: {'PASS' if report['no_illegal_ok'] else 'FAIL (' + str(len(illegal)) + ')'}\n"
+        f"  3. All future rows filled: {'PASS' if report['all_filled_ok'] else 'FAIL (' + str(len(unfilled_rows)) + ')'}"
+    )
+    return report
+
+
+def generate_schedule(wb: Workbook, start_date: date, number_of_weeks: int, day_of_week: str,
+                      today: date):
+    """Full 'Generate Schedule' flow mirroring the VBA button: generate dates,
+    check staffing, assign, verify, and summarise."""
+    generate_dates(wb, start_date, number_of_weeks, day_of_week, today)
+    check_active_staff_threshold(wb, today)
+    slots = assign_future_schedule(wb, today)
+    report = verify_generated_schedule(wb, today)
+    summary = fairness_summary(wb)
+    return slots, report, summary

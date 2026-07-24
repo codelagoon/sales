@@ -41,6 +41,26 @@ fair over months and years, not just within one schedule.
 
 The full algorithm is in [`vba/AssignedLateSchedule.bas`](vba/AssignedLateSchedule.bas).
 
+## Transparency, safeguards & verification
+
+- **Fairness Summary block** – a panel beside the schedule (outside the print
+  area) shows a statistical analysis of workload spread computed live from
+  History: active mechanics, total assignments, the **assignment gap**
+  (busiest minus least-busy) and the **workload standard deviation** (spread;
+  lower is more even). Refreshed by `UpdateFairnessSummary` on each generate.
+- **Audit logging** – `CommitAssignmentToHistory` writes a `Selection Note` on
+  every History row explaining why each mechanic was chosen (lifetime/recent
+  load, idle time, pairing rotation, location balance).
+- **Duplicate prevention** – `WouldDuplicateOnDate` strictly blocks a mechanic
+  from being placed at both buildings on the same date.
+- **Active staff threshold** – `CheckActiveStaffThreshold` runs before assigning
+  and aborts with a clear message if any generated date lacks enough active,
+  available mechanics to fill its empty slots.
+- **Post-generation verification** – `VerifyGeneratedSchedule` runs after
+  optimisation and reports a validation log confirming: (1) zero duplicate
+  mechanics on a date, (2) zero inactive/unavailable mechanics scheduled, and
+  (3) all future rows filled. The log appears in the completion message.
+
 ## Building the workbook (developers)
 
 Requires Python 3. No Microsoft Excel needed.

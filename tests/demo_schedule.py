@@ -14,7 +14,10 @@ from schedule_engine import (
     LOCATION_TWO,
     Workbook,
     assign_future_schedule,
+    check_active_staff_threshold,
+    fairness_summary,
     generate_dates,
+    verify_generated_schedule,
 )
 
 ROSTER = ["Ava Torres", "Ben Cole", "Cara Diaz", "Drew Kim",
@@ -57,9 +60,23 @@ def main():
 
     # Cycle 1: a supervisor generates 12 Fridays starting 8/7/2026.
     generate_dates(wb, date(2026, 8, 7), 12, "Friday", TODAY)
+    check_active_staff_threshold(wb, TODAY)
     assign_future_schedule(wb, TODAY)
     show(wb, "CYCLE 1  -  Generate Schedule (12 Fridays, 7 mechanics)")
     fairness(wb)
+
+    # Transparency: post-generation verification log + fairness statistics.
+    print(verify_generated_schedule(wb, TODAY)["log"])
+    s = fairness_summary(wb)
+    print("\nFairness Summary block (statistical analysis, from History):")
+    print(f"  Active mechanics: {s['active_mechanics']}   "
+          f"Total assignments: {s['total_assignments']}")
+    print(f"  Assignment gap (busiest minus least-busy): {s['gap']}")
+    print(f"  Workload standard deviation (spread; lower is more even): {s['stdev']}")
+    print("\nAudit notes (why each mechanic was selected) - first 4 rows:")
+    for h in wb.history[:4]:
+        print(f"  {h.date:%m/%d} {h.location:<16} {h.mechanic:<12} | {h.note}")
+    print()
 
     # Cycle 2: next quarter, with one mechanic unavailable on the first date.
     next_start = wb.schedule[-1]["date"] + timedelta(days=7)

@@ -15,20 +15,29 @@ Private Type ScheduleSlot
     TableRow As Long
     TableColumn As Long
     Mechanic As String
+    Note As String
 End Type
 
 ' Main supervisor action: build dates, assign every empty future slot, and
 ' permanently record the resulting assignments.
 Public Sub GenerateSchedule()
+    Dim verificationLog As String
     On Error GoTo HandleError
     Application.ScreenUpdating = False
     Application.EnableEvents = False
 
     GenerateDatesInternal
+    CheckActiveStaffThreshold           ' operational safeguard (aborts if understaffed)
     AssignFutureSchedule
     PrepareScheduleForPrinting
+    UpdateFairnessSummary               ' transparency: refresh statistics block
+    verificationLog = VerifyGeneratedSchedule()  ' post-generation work verification
 
-    MsgBox "The late schedule has been generated.", vbInformation, "Assigned Late Schedule"
+    Application.EnableEvents = True
+    Application.ScreenUpdating = True
+    MsgBox "The late schedule has been generated." & vbCrLf & vbCrLf & verificationLog, _
+           vbInformation, "Assigned Late Schedule"
+    Exit Sub
 CleanExit:
     Application.EnableEvents = True
     Application.ScreenUpdating = True
@@ -137,6 +146,45 @@ Private Sub RemoveUnusedFutureBlankDates(ByVal schedule As ListObject, ByVal dat
     Next scheduleRow
 End Sub
 
+' Operational safeguards -----------------------------------------------------
+
+' Pre-execution staffing check. Every empty location cell needs two mechanics,
+' so a fully empty date needs four distinct active mechanics who are available
+' that day. Aborts with a clear, supervisor-friendly message naming the first
+' date that cannot be staffed.
+Private Sub CheckActiveStaffThreshold()
+    Dim schedule As ListObject, row As ListRow, eligible As Collection
+    Dim dateIndex As Long, firstLocationIndex As Long, secondLocationIndex As Long
+    Dim scheduleDate As Date, needed As Long, available As Long, candidate As Variant
+
+    Set eligible = ActiveMechanics()
+    Set schedule = GetTable("ScheduleTable")
+    dateIndex = GetColumnIndex(schedule, "Date")
+    firstLocationIndex = GetColumnIndex(schedule, LOCATION_ONE)
+    secondLocationIndex = GetColumnIndex(schedule, LOCATION_TWO)
+
+    For Each row In schedule.ListRows
+        If IsFutureScheduleDate(row.Range.Cells(1, dateIndex).Value) Then
+            scheduleDate = CDate(row.Range.Cells(1, dateIndex).Value)
+            needed = 0
+            If IsBlank(row.Range.Cells(1, firstLocationIndex).Value) Then needed = needed + 2
+            If IsBlank(row.Range.Cells(1, secondLocationIndex).Value) Then needed = needed + 2
+            If needed > 0 Then
+                available = 0
+                For Each candidate In eligible
+                    If Not IsUnavailable(CStr(candidate), scheduleDate) Then available = available + 1
+                Next candidate
+                If available < needed Then
+                    Err.Raise vbObjectError + 110, , _
+                        "Only " & available & " active, available mechanic(s) on " & _
+                        Format$(scheduleDate, "m/d/yyyy") & "; " & needed & " are required. " & _
+                        "Add active mechanics or remove availability blocks for that date, then try again."
+                End If
+            End If
+        End If
+    Next row
+End Sub
+
 ' Assignment engine ----------------------------------------------------------
 
 ' Builds all future empty slots first, selects across the entire set, then
@@ -165,7 +213,7 @@ Private Sub AssignFutureSchedule()
     ImproveSchedule slots, slotCount, eligible, totalCounts, recentCounts, _
                     locationCounts, lastAssigned, pairCounts
     WriteSlotsToSchedule slots, slotCount
-    AppendScheduleToHistory slots, slotCount
+    CommitAssignmentToHistory slots, slotCount
 End Sub
 
 ' Selects the next assignment from every remaining date/location rather than
@@ -201,11 +249,69 @@ Private Sub AssignSlotsGlobally(ByRef slots() As ScheduleSlot, ByVal slotCount A
         If bestSlot = 0 Then Err.Raise vbObjectError + 102, , _
             "No eligible mechanic is available for every future schedule date."
 
+        ' Explicit duplicate-assignment guard: never place a mechanic at both
+        ' buildings on the same date (scoring already avoids it; this enforces).
+        If WouldDuplicateOnDate(bestMechanic, bestSlot, slots, slotCount) Then _
+            Err.Raise vbObjectError + 111, , _
+                bestMechanic & " would be assigned twice on " & _
+                Format$(slots(bestSlot).ScheduleDate, "m/d/yyyy") & "."
+
+        slots(bestSlot).Note = BuildSelectionNote(bestMechanic, slots(bestSlot), totalCounts, _
+                                                  recentCounts, locationCounts, lastAssigned, _
+                                                  pairCounts, slots, slotCount)
         slots(bestSlot).Mechanic = bestMechanic
         ApplyTemporaryAssignment bestMechanic, slots(bestSlot), totalCounts, recentCounts, _
                                  locationCounts, lastAssigned, pairCounts, slots, slotCount
     Next assigned
 End Sub
+
+' Explicit same-date duplicate guard used inside the assignment loop.
+Private Function WouldDuplicateOnDate(ByVal mechanic As String, ByVal targetSlot As Long, _
+                                      ByRef slots() As ScheduleSlot, ByVal slotCount As Long) As Boolean
+    Dim index As Long
+    For index = 1 To slotCount
+        If index <> targetSlot And slots(index).ScheduleDate = slots(targetSlot).ScheduleDate _
+           And slots(index).Mechanic = mechanic Then
+            WouldDuplicateOnDate = True
+            Exit Function
+        End If
+    Next index
+End Function
+
+' Builds the short audit tag stored with each history row explaining why this
+' mechanic won the slot (lowest lifetime/recent load, idle time, pairing
+' rotation status, and location balance).
+Private Function BuildSelectionNote(ByVal mechanic As String, ByRef slot As ScheduleSlot, _
+                                    ByVal totalCounts As Object, ByVal recentCounts As Object, _
+                                    ByVal locationCounts As Object, ByVal lastAssigned As Object, _
+                                    ByVal pairCounts As Object, ByRef slots() As ScheduleSlot, _
+                                    ByVal slotCount As Long) As String
+    Dim lifetime As Long, recent As Long, idle As String, pairText As String
+    Dim partner As String, repeats As Long, locationGap As Long, daysSince As Long
+    lifetime = CLng(totalCounts(mechanic))
+    recent = CLng(recentCounts(mechanic))
+    If CDate(lastAssigned(mechanic)) <= DateSerial(1900, 1, 1) Then
+        idle = "new"
+    Else
+        daysSince = WorksheetFunction.Max(0, DateDiff("d", CDate(lastAssigned(mechanic)), slot.ScheduleDate))
+        idle = daysSince & "d"
+    End If
+    partner = AssignedPartner(slot, slots, slotCount)
+    If Len(partner) > 0 Then
+        repeats = 0
+        If pairCounts.Exists(PairKey(mechanic, partner)) Then repeats = CLng(pairCounts(PairKey(mechanic, partner)))
+        If repeats = 0 Then
+            pairText = "new pairing w/ " & partner
+        Else
+            pairText = "paired w/ " & partner & " x" & repeats
+        End If
+    Else
+        pairText = "pairing pending"
+    End If
+    locationGap = LocationImbalanceAfter(mechanic, slot.Location, locationCounts)
+    BuildSelectionNote = "lifetime " & lifetime & ", recent " & recent & ", idle " & idle & _
+                         ", " & pairText & ", loc-gap " & locationGap
+End Function
 
 ' Scores a candidate lexicographically through heavily separated terms:
 ' lifetime total, time since last assignment, recent load, consecutive dates,
@@ -374,9 +480,10 @@ End Sub
 
 ' History --------------------------------------------------------------------
 
-' Adds every newly generated assignment to the permanent History table. The
-' duplicate key makes rerunning Generate Schedule safe.
-Private Sub AppendScheduleToHistory(ByRef slots() As ScheduleSlot, ByVal slotCount As Long)
+' Adds every newly generated assignment to the permanent History table, together
+' with an audit note recording why the mechanic was selected. The duplicate key
+' makes rerunning Generate Schedule safe.
+Private Sub CommitAssignmentToHistory(ByRef slots() As ScheduleSlot, ByVal slotCount As Long)
     Dim history As ListObject, existing As Object, index As Long, historyRow As ListRow
     Dim key As String
     Set history = GetTable("HistoryTable")
@@ -389,6 +496,7 @@ Private Sub AppendScheduleToHistory(ByRef slots() As ScheduleSlot, ByVal slotCou
             historyRow.Range.Cells(1, GetColumnIndex(history, "Location")).Value = slots(index).Location
             historyRow.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value = slots(index).Mechanic
             historyRow.Range.Cells(1, GetColumnIndex(history, "Assignment Created On")).Value = Now
+            historyRow.Range.Cells(1, GetColumnIndex(history, "Selection Note")).Value = slots(index).Note
             existing.Add key, True
         End If
     Next index
@@ -729,6 +837,126 @@ End Function
 
 Private Function IsBlank(ByVal value As Variant) As Boolean
     IsBlank = Len(Trim$(CStr(value))) = 0
+End Function
+
+' Transparency & verification ------------------------------------------------
+
+' Refreshes the Fairness Summary block on the Schedule sheet with a statistical
+' analysis of lifetime workload spread across active mechanics, read live from
+' History. Standard deviation and the max-to-min gap quantify fairness.
+Private Sub UpdateFairnessSummary()
+    Dim eligible As Collection, counts As Object, mechanic As Variant
+    Dim total As Long, maxCount As Long, minCount As Long, n As Long
+    Dim mean As Double, sumSq As Double, stdev As Double, gap As Long
+
+    Set eligible = ActiveMechanics()
+    Set counts = LifetimeCounts(eligible)
+    n = 0
+    total = 0
+    maxCount = 0
+    minCount = 2147483647
+    For Each mechanic In counts.Keys
+        n = n + 1
+        total = total + CLng(counts(mechanic))
+        maxCount = WorksheetFunction.Max(maxCount, CLng(counts(mechanic)))
+        minCount = WorksheetFunction.Min(minCount, CLng(counts(mechanic)))
+    Next mechanic
+
+    If n = 0 Then
+        gap = 0
+        stdev = 0
+    Else
+        gap = maxCount - minCount
+        mean = total / n
+        sumSq = 0
+        For Each mechanic In counts.Keys
+            sumSq = sumSq + (CLng(counts(mechanic)) - mean) ^ 2
+        Next mechanic
+        stdev = Sqr(sumSq / n)
+    End If
+
+    SetNamedValue "FairnessActiveCount", n
+    SetNamedValue "FairnessTotal", total
+    SetNamedValue "FairnessGap", gap
+    SetNamedValue "FairnessStdDev", Round(stdev, 3)
+End Sub
+
+Private Sub SetNamedValue(ByVal nameText As String, ByVal value As Variant)
+    On Error Resume Next
+    ThisWorkbook.Names(nameText).RefersToRange.Value = value
+    On Error GoTo 0
+End Sub
+
+' Post-generation work verification. Confirms, over every future row: (1) zero
+' duplicate mechanics on the same date, (2) zero inactive/unavailable mechanics
+' scheduled, and (3) all future rows filled. Returns a human-readable log.
+Private Function VerifyGeneratedSchedule() As String
+    Dim schedule As ListObject, row As ListRow, eligible As Collection
+    Dim dateIndex As Long, firstLocationIndex As Long, secondLocationIndex As Long
+    Dim activeSet As Object, mechanic As Variant, peopleToday As Object
+    Dim duplicateDates As Long, illegalCount As Long, unfilledCount As Long
+    Dim scheduleDate As Date, colIndex As Variant, cellValue As String
+    Dim parts() As String, i As Long, name As String
+
+    Set eligible = ActiveMechanics()
+    Set activeSet = CreateObject("Scripting.Dictionary")
+    For Each mechanic In eligible
+        activeSet(CStr(mechanic)) = True
+    Next mechanic
+
+    Set schedule = GetTable("ScheduleTable")
+    dateIndex = GetColumnIndex(schedule, "Date")
+    firstLocationIndex = GetColumnIndex(schedule, LOCATION_ONE)
+    secondLocationIndex = GetColumnIndex(schedule, LOCATION_TWO)
+
+    For Each row In schedule.ListRows
+        If IsFutureScheduleDate(row.Range.Cells(1, dateIndex).Value) Then
+            scheduleDate = CDate(row.Range.Cells(1, dateIndex).Value)
+            Set peopleToday = CreateObject("Scripting.Dictionary")
+            For Each colIndex In Array(firstLocationIndex, secondLocationIndex)
+                cellValue = Trim$(CStr(row.Range.Cells(1, CLng(colIndex)).Value))
+                If Len(cellValue) = 0 Then
+                    unfilledCount = unfilledCount + 1
+                Else
+                    parts = Split(cellValue, PAIR_SEPARATOR)
+                    For i = LBound(parts) To UBound(parts)
+                        name = Trim$(parts(i))
+                        If Len(name) > 0 Then
+                            If peopleToday.Exists(name) Then
+                                peopleToday(name) = CLng(peopleToday(name)) + 1
+                            Else
+                                peopleToday.Add name, 1
+                            End If
+                            If Not activeSet.Exists(name) Then
+                                illegalCount = illegalCount + 1
+                            ElseIf IsUnavailable(name, scheduleDate) Then
+                                illegalCount = illegalCount + 1
+                            End If
+                        End If
+                    Next i
+                End If
+            Next colIndex
+            For Each mechanic In peopleToday.Keys
+                If CLng(peopleToday(mechanic)) > 1 Then
+                    duplicateDates = duplicateDates + 1
+                    Exit For
+                End If
+            Next mechanic
+        End If
+    Next row
+
+    VerifyGeneratedSchedule = "Verification results:" & vbCrLf & _
+        "  1. No duplicate mechanic on a date: " & PassFail(duplicateDates) & vbCrLf & _
+        "  2. No inactive/unavailable scheduled: " & PassFail(illegalCount) & vbCrLf & _
+        "  3. All future rows filled: " & PassFail(unfilledCount)
+End Function
+
+Private Function PassFail(ByVal violations As Long) As String
+    If violations = 0 Then
+        PassFail = "PASS"
+    Else
+        PassFail = "FAIL (" & violations & ")"
+    End If
 End Function
 
 ' Printing -------------------------------------------------------------------

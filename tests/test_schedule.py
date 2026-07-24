@@ -19,8 +19,12 @@ from schedule_engine import (
     Workbook,
     HistoryRow,
     assign_future_schedule,
+    check_active_staff_threshold,
+    fairness_summary,
     first_matching_date,
     generate_dates,
+    generate_schedule,
+    verify_generated_schedule,
     weekday_number,
 )
 
@@ -244,6 +248,84 @@ def test_history_biases_future_toward_underloaded():
                   for m in ["B", "C", "D", "E"]}
     assert a_new <= min(others_new.values()), (
         f"overloaded mechanic A got too many new assignments: A={a_new}, others={others_new}")
+
+
+def test_staff_threshold_aborts_when_date_understaffed():
+    # 5 active mechanics, but 2 are unavailable on the first date -> only 3
+    # available, fewer than the 4 needed for a full day.
+    wb = make_workbook(["A", "B", "C", "D", "E"])
+    generate_dates(wb, date(2026, 8, 7), 6, "Friday", TODAY)
+    first_date = wb.schedule[0]["date"]
+    wb.availability.append(("A", first_date, "Vacation"))
+    wb.availability.append(("B", first_date, "Sick"))
+    raised = ""
+    try:
+        assign_future_schedule(wb, TODAY)
+    except ValueError as exc:
+        raised = str(exc)
+    assert "available mechanic" in raised, f"expected staffing abort, got: {raised!r}"
+    assert first_date.strftime("%m/%d/%Y") in raised, "message should name the date"
+
+
+def test_staff_threshold_passes_with_enough_available():
+    wb = make_workbook(["A", "B", "C", "D", "E"])
+    generate_dates(wb, date(2026, 8, 7), 6, "Friday", TODAY)
+    check_active_staff_threshold(wb, TODAY)  # must not raise
+
+
+def test_audit_note_recorded_and_explains_choice():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    generate_dates(wb, date(2026, 8, 7), 6, "Friday", TODAY)
+    assign_future_schedule(wb, TODAY)
+    assert all(h.note for h in wb.history), "every history row must have an audit note"
+    sample = wb.history[0].note
+    for token in ("lifetime", "recent", "idle", "loc-gap"):
+        assert token in sample, f"audit note missing '{token}': {sample!r}"
+
+
+def test_verification_routine_all_pass():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    generate_dates(wb, date(2026, 8, 7), 10, "Friday", TODAY)
+    assign_future_schedule(wb, TODAY)
+    report = verify_generated_schedule(wb, TODAY)
+    assert report["all_passed"], report["log"]
+    assert report["duplicate_dates"] == []
+    assert report["illegal_assignments"] == []
+    assert report["unfilled_rows"] == []
+
+
+def test_verification_detects_problems():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    generate_dates(wb, date(2026, 8, 7), 4, "Friday", TODAY)
+    assign_future_schedule(wb, TODAY)
+    # Inject a duplicate + an inactive mechanic into a future row to prove the
+    # verifier catches problems (it should never happen from the engine).
+    wb.schedule[1][LOCATION_ONE] = "A / A"          # duplicate on the date
+    wb.schedule[2][LOCATION_TWO] = "Ghost / Zed"    # inactive mechanics
+    report = verify_generated_schedule(wb, TODAY)
+    assert not report["all_passed"]
+    assert wb.schedule[1]["date"] in report["duplicate_dates"]
+    reasons = {r[3] for r in report["illegal_assignments"]}
+    assert "inactive" in reasons
+
+
+def test_fairness_summary_statistics():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    generate_dates(wb, date(2026, 8, 7), 12, "Friday", TODAY)
+    assign_future_schedule(wb, TODAY)
+    summary = fairness_summary(wb)
+    assert summary["active_mechanics"] == 6
+    assert summary["total_assignments"] == 48  # 12 weeks x 4
+    assert summary["gap"] == 0                 # 48 / 6 = 8 each
+    assert summary["stdev"] == 0.0             # perfectly even -> zero spread
+
+
+def test_generate_schedule_full_flow():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    slots, report, summary = generate_schedule(wb, date(2026, 8, 7), 8, "Friday", TODAY)
+    assert report["all_passed"], report["log"]
+    assert summary["gap"] <= 1
+    assert len(slots) == 8 * 4
 
 
 def test_determinism():

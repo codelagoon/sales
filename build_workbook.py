@@ -59,6 +59,8 @@ def _add_schedule_sheet(workbook: xlsxwriter.Workbook) -> None:
     sheet.set_column("B:C", 37)
     sheet.set_column("D:D", 2)
     sheet.set_column("E:E", 20)
+    sheet.set_column("F:F", 26)
+    sheet.set_column("G:G", 12)
 
     navy = "#1F4E78"
     border = "#7F7F7F"
@@ -215,8 +217,43 @@ def _add_schedule_sheet(workbook: xlsxwriter.Workbook) -> None:
         "E7",
         {"macro": "PrintSchedule", "caption": "Print Schedule", "width": 150, "height": 24, "font": {"bold": True, "color": "#FFFFFF"}, "fill": {"color": "#4472C4"}, "line": {"color": "#1F4E78"}},
     )
+
+    _add_fairness_summary(workbook, sheet, navy, border)
+
     sheet.print_area("A1:C12")
     sheet.freeze_panes(10, 0)
+
+
+def _add_fairness_summary(workbook, sheet, navy, border):
+    """Transparency block: statistical analysis of workload spread, refreshed by
+    the UpdateFairnessSummary macro from the History sheet. Plain-language labels
+    accompany each technical metric. Placed to the side, outside the print area.
+    """
+    header = workbook.add_format(
+        {"bold": True, "font_color": "#FFFFFF", "bg_color": navy,
+         "align": "center", "valign": "vcenter"}
+    )
+    metric_label = workbook.add_format(
+        {"font_color": "#1F1F1F", "font_size": 9, "text_wrap": True, "valign": "vcenter",
+         "border": 1, "border_color": border, "bg_color": "#EDEDED"}
+    )
+    metric_value = workbook.add_format(
+        {"bold": True, "font_size": 11, "align": "center", "valign": "vcenter",
+         "border": 1, "border_color": border, "num_format": "0.###"}
+    )
+
+    sheet.merge_range("E9:G9", "Fairness Summary (statistical analysis)", header)
+    rows = [
+        (10, "Active mechanics", "FairnessActiveCount"),
+        (11, "Total late assignments recorded", "FairnessTotal"),
+        (12, "Assignment gap (busiest minus least-busy)", "FairnessGap"),
+        (13, "Workload standard deviation (spread; lower is more even)", "FairnessStdDev"),
+    ]
+    for row, label_text, name in rows:
+        sheet.merge_range(row, 4, row, 5, label_text, metric_label)  # E:F
+        sheet.write_number(row, 6, 0, metric_value)                  # G
+        workbook.define_name(name, f"=Schedule!$G${row + 1}")
+        sheet.set_row(row, 26)
 
 
 def _add_mechanics_sheet(workbook: xlsxwriter.Workbook) -> None:
@@ -267,9 +304,10 @@ def _add_history_sheet(workbook: xlsxwriter.Workbook) -> None:
     sheet.set_column("B:B", 22)
     sheet.set_column("C:C", 34)
     sheet.set_column("D:D", 22)
+    sheet.set_column("E:E", 60)
     date_format = workbook.add_format({"num_format": "m/d/yyyy h:mm AM/PM"})
     sheet.add_table(
-        "A1:D2",
+        "A1:E2",
         {
             "name": "HistoryTable",
             "style": "Table Style Medium 15",
@@ -278,6 +316,7 @@ def _add_history_sheet(workbook: xlsxwriter.Workbook) -> None:
                 {"header": "Location"},
                 {"header": "Mechanic"},
                 {"header": "Assignment Created On", "format": date_format},
+                {"header": "Selection Note"},
             ],
         },
     )
