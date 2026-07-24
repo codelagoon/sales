@@ -1,0 +1,6 @@
+# Build/compile the macro-enabled workbook (no Microsoft Excel required)
+XlsxWriter==3.2.9      # builds the workbook layout, tables, names, buttons
+pyOpenVBA==3.1.0       # compiles vba/*.bas into assets/vbaProject.bin
+
+# Verification / tests
+oletools==0.60.2       # inspects the embedded VBA project
