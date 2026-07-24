@@ -9,6 +9,10 @@ Private Const LOCATION_ONE As String = "1 Centre Street"
 Private Const LOCATION_TWO As String = "100 Centre Street"
 Private Const PAIR_SEPARATOR As String = " / "
 
+' Tracks the current step so error messages can name exactly where a failure
+' occurred (helps diagnose issues without a debugger).
+Private mStage As String
+
 Private Type ScheduleSlot
     ScheduleDate As Date
     Location As String
@@ -26,11 +30,17 @@ Public Sub GenerateSchedule()
     Application.ScreenUpdating = False
     Application.EnableEvents = False
 
+    mStage = "generating schedule dates"
     GenerateDatesInternal
+    mStage = "checking active staffing"
     CheckActiveStaffThreshold           ' operational safeguard (aborts if understaffed)
+    mStage = "assigning mechanics"
     AssignFutureSchedule
+    mStage = "preparing the printout"
     PrepareScheduleForPrinting
+    mStage = "updating the fairness summary"
     UpdateFairnessSummary               ' transparency: refresh statistics block
+    mStage = "verifying the result"
     verificationLog = VerifyGeneratedSchedule()  ' post-generation work verification
 
     Application.EnableEvents = True
@@ -43,7 +53,9 @@ CleanExit:
     Application.ScreenUpdating = True
     Exit Sub
 HandleError:
-    MsgBox Err.Description, vbExclamation, "Schedule not generated"
+    MsgBox "Could not finish while " & mStage & "." & vbCrLf & vbCrLf & _
+           Err.Description & " (error " & (Err.Number And &HFFFF&) & ")", _
+           vbExclamation, "Schedule not generated"
     Resume CleanExit
 End Sub
 
@@ -758,6 +770,8 @@ Private Function FirstEmptyScheduleRow(ByVal schedule As ListObject, ByVal dateI
 End Function
 
 Private Sub SortScheduleByDate(ByVal schedule As ListObject, ByVal dateIndex As Long)
+    If schedule.ListRows Is Nothing Then Exit Sub
+    If schedule.ListRows.Count < 2 Then Exit Sub
     With schedule.Sort
         .SortFields.Clear
         .SortFields.Add Key:=schedule.ListColumns(dateIndex).Range, SortOn:=xlSortOnValues, Order:=xlAscending
@@ -784,12 +798,14 @@ Private Function WeekdayNumber(ByVal weekdayName As String) As Long
 End Function
 
 Private Function GetTable(ByVal tableName As String) As ListObject
-    Dim sheet As Worksheet
+    Dim sheet As Worksheet, listObj As ListObject
     For Each sheet In ThisWorkbook.Worksheets
-        On Error Resume Next
-        Set GetTable = sheet.ListObjects(tableName)
-        On Error GoTo 0
-        If Not GetTable Is Nothing Then Exit Function
+        For Each listObj In sheet.ListObjects
+            If StrComp(listObj.Name, tableName, vbTextCompare) = 0 Then
+                Set GetTable = listObj
+                Exit Function
+            End If
+        Next listObj
     Next sheet
     Err.Raise vbObjectError + 104, , "Workbook table '" & tableName & "' was not found."
 End Function
@@ -802,21 +818,34 @@ Private Function GetColumnIndex(ByVal table As ListObject, ByVal columnName As S
     GetColumnIndex = table.ListColumns(columnName).Index
 End Function
 
+' Resolves a workbook-level named cell (the three settings) to a Range and
+' raises a clear, named error if the name is missing, instead of a cryptic
+' "object variable not set" failure.
+Private Function SettingRange(ByVal nameText As String) As Range
+    On Error GoTo Fail
+    Set SettingRange = ThisWorkbook.Names(nameText).RefersToRange
+    If SettingRange Is Nothing Then GoTo Fail
+    Exit Function
+Fail:
+    Err.Raise vbObjectError + 108, , "The workbook setting '" & nameText & "' could not be found. " & _
+        "Rebuild the workbook with build_workbook.py."
+End Function
+
 Private Function GetNamedDate(ByVal nameText As String) As Date
-    If Not IsDate(ThisWorkbook.Names(nameText).RefersToRange.Value) Then _
+    If Not IsDate(SettingRange(nameText).Value) Then _
         Err.Raise vbObjectError + 105, , "Enter a valid Start Date."
-    GetNamedDate = CDate(ThisWorkbook.Names(nameText).RefersToRange.Value)
+    GetNamedDate = CDate(SettingRange(nameText).Value)
 End Function
 
 Private Function GetNamedPositiveLong(ByVal nameText As String) As Long
-    If Not IsNumeric(ThisWorkbook.Names(nameText).RefersToRange.Value) Then _
+    If Not IsNumeric(SettingRange(nameText).Value) Then _
         Err.Raise vbObjectError + 106, , "Enter a whole number of weeks."
-    GetNamedPositiveLong = CLng(ThisWorkbook.Names(nameText).RefersToRange.Value)
+    GetNamedPositiveLong = CLng(SettingRange(nameText).Value)
     If GetNamedPositiveLong < 1 Then Err.Raise vbObjectError + 107, , "Number of Weeks must be at least 1."
 End Function
 
 Private Function GetNamedText(ByVal nameText As String) As String
-    GetNamedText = CStr(ThisWorkbook.Names(nameText).RefersToRange.Value)
+    GetNamedText = CStr(SettingRange(nameText).Value)
 End Function
 
 Private Function DateKey(ByVal value As Date) As String
