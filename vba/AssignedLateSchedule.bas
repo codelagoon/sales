@@ -121,7 +121,8 @@ Private Sub GenerateDatesInternal()
     Dim schedule As ListObject, scheduleRow As ListRow
     Dim dateIndex As Long, firstLocationIndex As Long, secondLocationIndex As Long
     Dim generatedDate As Date, weekNumber As Long
-    Dim existingDates As Object
+    Dim targetDates As Object, existingDates As Object
+    Dim targetDate As Variant
 
     startDate = GetNamedDate("ScheduleStartDate")
     numberOfWeeks = GetNamedPositiveLong("ScheduleWeekCount")
@@ -131,35 +132,51 @@ Private Sub GenerateDatesInternal()
     firstLocationIndex = GetColumnIndex(schedule, LOCATION_ONE)
     secondLocationIndex = GetColumnIndex(schedule, LOCATION_TWO)
 
-    RemoveUnusedFutureBlankDates schedule, dateIndex, firstLocationIndex, secondLocationIndex
-    Set existingDates = ExistingScheduleDates(schedule, dateIndex)
+    ' Build the exact future date set implied by the three settings, then make
+    ' the Schedule table match it. Changing Day of Week / weeks replaces old
+    ' future rows; past dates and History are never touched.
+    Set targetDates = NewDictionary()
     generatedDate = FirstMatchingDate(startDate, requestedDay)
-
     For weekNumber = 1 To numberOfWeeks
-        If Not existingDates.Exists(DateKey(generatedDate)) Then
-            Set scheduleRow = FirstEmptyScheduleRow(schedule, dateIndex)
-            If scheduleRow Is Nothing Then Set scheduleRow = schedule.ListRows.Add
-            scheduleRow.Range.Cells(1, dateIndex).Value = generatedDate
-            scheduleRow.Range.Cells(1, dateIndex).NumberFormat = "dddd, m/d/yyyy"
-            existingDates.Add DateKey(generatedDate), True
-        End If
+        If generatedDate >= Date Then targetDates(DateKey(generatedDate)) = generatedDate
         generatedDate = DateAdd("d", 7, generatedDate)
     Next weekNumber
+
+    ReplaceFutureScheduleDates schedule, dateIndex, firstLocationIndex, secondLocationIndex, targetDates
+
+    Set existingDates = ExistingScheduleDates(schedule, dateIndex)
+    For Each targetDate In targetDates.Items
+        If Not existingDates.Exists(DateKey(CDate(targetDate))) Then
+            Set scheduleRow = FirstEmptyScheduleRow(schedule, dateIndex)
+            If scheduleRow Is Nothing Then Set scheduleRow = schedule.ListRows.Add
+            scheduleRow.Range.Cells(1, dateIndex).Value = CDate(targetDate)
+            scheduleRow.Range.Cells(1, dateIndex).NumberFormat = "dddd, m/d/yyyy"
+            existingDates.Add DateKey(CDate(targetDate)), True
+        End If
+    Next targetDate
 
     SortScheduleByDate schedule, dateIndex
 End Sub
 
-' Clears obsolete, unassigned future dates. Any scheduled or historic date is
-' preserved, which prevents changing settings from erasing completed work.
-Private Sub RemoveUnusedFutureBlankDates(ByVal schedule As ListObject, ByVal dateIndex As Long, _
-                                         ByVal firstLocationIndex As Long, ByVal secondLocationIndex As Long)
-    Dim scheduleRow As ListRow
+' Makes future Schedule rows match the current settings. Any future date that is
+' not in the new target set (wrong weekday, outside the week window, or leftover
+' blank) is cleared so Generate Schedule replaces instead of stacking old days.
+' Past dates are preserved as a visible record; History is never modified here.
+Private Sub ReplaceFutureScheduleDates(ByVal schedule As ListObject, ByVal dateIndex As Long, _
+                                       ByVal firstLocationIndex As Long, ByVal secondLocationIndex As Long, _
+                                       ByVal targetDates As Object)
+    Dim scheduleRow As ListRow, scheduleDate As Date
     For Each scheduleRow In schedule.ListRows
         If IsFutureScheduleDate(scheduleRow.Range.Cells(1, dateIndex).Value) Then
-            If IsBlank(scheduleRow.Range.Cells(1, firstLocationIndex).Value) And _
-               IsBlank(scheduleRow.Range.Cells(1, secondLocationIndex).Value) Then
+            scheduleDate = CDate(scheduleRow.Range.Cells(1, dateIndex).Value)
+            If Not targetDates.Exists(DateKey(scheduleDate)) Then
                 scheduleRow.Range.Cells(1, dateIndex).ClearContents
+                scheduleRow.Range.Cells(1, firstLocationIndex).ClearContents
+                scheduleRow.Range.Cells(1, secondLocationIndex).ClearContents
             End If
+        ElseIf IsBlank(scheduleRow.Range.Cells(1, dateIndex).Value) Then
+            scheduleRow.Range.Cells(1, firstLocationIndex).ClearContents
+            scheduleRow.Range.Cells(1, secondLocationIndex).ClearContents
         End If
     Next scheduleRow
 End Sub

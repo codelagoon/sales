@@ -91,6 +91,47 @@ def test_dates_respect_other_weekdays():
         assert all(d.weekday() == py_wd for d in dates), f"{day} generated wrong weekday"
 
 
+def test_changing_day_of_week_replaces_future_dates():
+    wb = make_workbook(["A", "B", "C", "D", "E", "F"])
+    generate_schedule(wb, date(2026, 8, 7), 4, "Friday", TODAY)
+    friday_dates = [r["date"] for r in wb.schedule]
+    assert len(friday_dates) == 4
+    assert all(d.weekday() == 4 for d in friday_dates)
+    assert all(r[LOCATION_ONE] and r[LOCATION_TWO] for r in wb.schedule)
+
+    # Switch to Monday: future Friday rows must be replaced, not stacked.
+    generate_schedule(wb, date(2026, 8, 3), 4, "Monday", TODAY)
+    monday_dates = [r["date"] for r in wb.schedule]
+    assert len(monday_dates) == 4, monday_dates
+    assert all(d.weekday() == 0 for d in monday_dates), monday_dates
+    assert not any(d.weekday() == 4 for d in monday_dates)
+    assert all(r[LOCATION_ONE] and r[LOCATION_TWO] for r in wb.schedule)
+
+
+def test_reducing_week_count_drops_extra_future_dates():
+    wb = make_workbook(["A", "B", "C", "D"])
+    generate_dates(wb, date(2026, 8, 7), 8, "Friday", TODAY)
+    assert len(wb.schedule) == 8
+    generate_dates(wb, date(2026, 8, 7), 3, "Friday", TODAY)
+    dates = [r["date"] for r in wb.schedule]
+    assert len(dates) == 3
+    assert dates == [date(2026, 8, 7), date(2026, 8, 14), date(2026, 8, 21)]
+
+
+def test_past_dates_are_kept_when_settings_change():
+    wb = make_workbook(["A", "B", "C", "D"])
+    past = date(2025, 12, 26)  # Friday before TODAY (2026-01-01)
+    wb.schedule.append({
+        "date": past,
+        LOCATION_ONE: "A / B",
+        LOCATION_TWO: "C / D",
+    })
+    generate_dates(wb, date(2026, 8, 3), 2, "Monday", TODAY)
+    dates = [r["date"] for r in wb.schedule]
+    assert past in dates
+    assert sum(1 for d in dates if d.weekday() == 0) == 2
+
+
 def test_first_matching_date_is_on_or_after_start():
     # start on a Wednesday, ask for Friday -> two days later
     assert first_matching_date(date(2026, 8, 5), weekday_number("Friday")) == date(2026, 8, 7)

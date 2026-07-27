@@ -32,8 +32,11 @@ the permanent fairness history — happens automatically.
 
 ## Buttons
 
-- **Generate Schedule** – generate dates, assign every empty future slot, record history.
-- **Generate Dates** – only insert the schedule dates.
+- **Generate Schedule** – generate dates for the current settings, assign every
+  empty future slot, record history. If you change **Day of Week** or **Number
+  of Weeks**, future dates that no longer match are replaced (past dates and
+  History stay).
+- **Generate Dates** – only rebuild the schedule dates from the settings.
 - **Clear Future Schedule** – clear assignments for future dates only (history kept).
 - **Print Schedule** – format the Schedule sheet to print on one page where practical.
 

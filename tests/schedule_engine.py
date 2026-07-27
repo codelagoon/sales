@@ -90,15 +90,28 @@ def generate_dates(wb: Workbook, start_date: date, number_of_weeks: int, day_of_
         raise ValueError("Number of Weeks must be at least 1.")
     requested_day = weekday_number(day_of_week)
 
-    # RemoveUnusedFutureBlankDates: clear future rows that are entirely empty.
-    for row in wb.schedule:
-        d = row.get("date")
-        if _is_future(d, today) and _blank(row.get(LOCATION_ONE)) and _blank(row.get(LOCATION_TWO)):
-            row["date"] = None
-
-    existing = {_date_key(r["date"]) for r in wb.schedule if isinstance(r.get("date"), date)}
+    # Build the exact future date set implied by the settings, then replace any
+    # future Schedule rows that are not in that set (wrong weekday, outside the
+    # week window, leftover blanks). Past dates and History are untouched.
+    target_dates = {}
     generated = first_matching_date(start_date, requested_day)
     for _ in range(number_of_weeks):
+        if generated >= today:
+            target_dates[_date_key(generated)] = generated
+        generated = generated + timedelta(days=7)
+
+    for row in wb.schedule:
+        d = row.get("date")
+        if _is_future(d, today) and _date_key(d) not in target_dates:
+            row["date"] = None
+            row[LOCATION_ONE] = ""
+            row[LOCATION_TWO] = ""
+        elif _blank(d):
+            row[LOCATION_ONE] = ""
+            row[LOCATION_TWO] = ""
+
+    existing = {_date_key(r["date"]) for r in wb.schedule if isinstance(r.get("date"), date)}
+    for generated in target_dates.values():
         if _date_key(generated) not in existing:
             empty = _first_empty_row(wb)
             if empty is None:
@@ -106,7 +119,6 @@ def generate_dates(wb: Workbook, start_date: date, number_of_weeks: int, day_of_
                 wb.schedule.append(empty)
             empty["date"] = generated
             existing.add(_date_key(generated))
-        generated = generated + timedelta(days=7)
 
     wb.schedule = [r for r in wb.schedule if isinstance(r.get("date"), date)]
     wb.schedule.sort(key=lambda r: r["date"])
