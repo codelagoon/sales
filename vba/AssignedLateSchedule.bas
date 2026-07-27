@@ -34,7 +34,6 @@ Public Sub GenerateSchedule()
     GenerateDatesInternal
     mStage = "checking active staffing"
     CheckActiveStaffThreshold           ' operational safeguard (aborts if understaffed)
-    mStage = "assigning mechanics"
     AssignFutureSchedule
     mStage = "preparing the printout"
     PrepareScheduleForPrinting
@@ -207,24 +206,31 @@ Private Sub AssignFutureSchedule()
     Dim totalCounts As Object, recentCounts As Object, locationCounts As Object
     Dim lastAssigned As Object, pairCounts As Object
 
+    mStage = "assigning: reading the mechanics list"
     Set eligible = ActiveMechanics()
     If eligible.Count < 4 Then Err.Raise vbObjectError + 101, , _
         "At least four active mechanics are required (two locations x two mechanics per schedule date)."
 
+    mStage = "assigning: collecting open shifts"
     slotCount = CollectEmptyFutureSlots(slots)
     If slotCount = 0 Then Exit Sub
 
+    mStage = "assigning: reading history statistics"
     Set totalCounts = LifetimeCounts(eligible)
     Set recentCounts = RecentCounts(eligible, DateAdd("m", -3, Date))
     Set locationCounts = LifetimeLocationCounts(eligible)
     Set lastAssigned = LastAssignmentDates(eligible)
-    Set pairCounts = LifetimePairCounts
+    Set pairCounts = LifetimePairCounts()
 
+    mStage = "assigning: selecting the fairest mechanics"
     AssignSlotsGlobally slots, slotCount, eligible, totalCounts, recentCounts, _
                         locationCounts, lastAssigned, pairCounts
+    mStage = "assigning: balancing the plan"
     ImproveSchedule slots, slotCount, eligible, totalCounts, recentCounts, _
                     locationCounts, lastAssigned, pairCounts
+    mStage = "assigning: writing the schedule"
     WriteSlotsToSchedule slots, slotCount
+    mStage = "assigning: recording history"
     CommitAssignmentToHistory slots, slotCount
 End Sub
 
@@ -470,7 +476,7 @@ End Function
 ' format. It never changes populated schedule cells.
 Private Sub WriteSlotsToSchedule(ByRef slots() As ScheduleSlot, ByVal slotCount As Long)
     Dim schedule As ListObject, index As Long, scheduleRow As ListRow
-    Dim grouped As Object, key As String, cellValue As String
+    Dim grouped As Object, key As Variant, cellValue As String
     Set schedule = GetTable("ScheduleTable")
     Set grouped = CreateObject("Scripting.Dictionary")
     For index = 1 To slotCount
@@ -497,8 +503,15 @@ End Sub
 ' makes rerunning Generate Schedule safe.
 Private Sub CommitAssignmentToHistory(ByRef slots() As ScheduleSlot, ByVal slotCount As Long)
     Dim history As ListObject, existing As Object, index As Long, historyRow As ListRow
-    Dim key As String
+    Dim key As String, historySheet As Worksheet, priorVisibility As Long
     Set history = GetTable("HistoryTable")
+
+    ' Adding table rows is most reliable when the sheet is visible; the History
+    ' sheet is normally hidden, so make it visible for the write and restore it.
+    Set historySheet = history.Parent
+    priorVisibility = historySheet.Visible
+    If priorVisibility <> xlSheetVisible Then historySheet.Visible = xlSheetVisible
+
     Set existing = HistoryKeys(history)
     For index = 1 To slotCount
         key = DateKey(slots(index).ScheduleDate) & "|" & slots(index).Location & "|" & slots(index).Mechanic
@@ -512,6 +525,8 @@ Private Sub CommitAssignmentToHistory(ByRef slots() As ScheduleSlot, ByVal slotC
             existing.Add key, True
         End If
     Next index
+
+    If priorVisibility <> xlSheetVisible Then historySheet.Visible = priorVisibility
 End Sub
 
 ' Statistics -----------------------------------------------------------------
