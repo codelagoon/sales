@@ -24,7 +24,9 @@ compatibility unless explicitly requested — the VBA engine depends on
 - Build/test toolchain is pure Python (XlsxWriter, pyOpenVBA, oletools); no
   Microsoft Excel or LibreOffice is required to build or test.
 - Standard commands (see `README.md`): `python tools/compile_vba.py` then
-  `python build_workbook.py`; tests via `python tests/test_schedule.py`.
+  `python build_workbook.py`; tests via `python tests/test_schedule.py`;
+  VBA name-collision guard via `python tools/check_vba_names.py` (run before
+  compile — case-insensitive Dim/Function name clashes cause runtime error 91).
 - The VBA cannot execute headlessly here (no Excel). The Python port in
   `tests/schedule_engine.py` mirrors the VBA exactly and is the way to verify
   scheduling/fairness logic. **Keep it in sync with `vba/AssignedLateSchedule.bas`**:
