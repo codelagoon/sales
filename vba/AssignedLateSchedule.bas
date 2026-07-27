@@ -213,6 +213,7 @@ Private Sub AssignFutureSchedule()
     Dim totalCounts As Object, recentCounts As Object, locationCounts As Object
     Dim lastAssigned As Object, pairCounts As Object
     Dim historySheet As Worksheet, historyWasHidden As Boolean
+    Dim baseLocationCounts As Object
 
     mStage = "assigning: reading the mechanics list"
     Set eligible = ActiveMechanics()
@@ -229,26 +230,19 @@ Private Sub AssignFutureSchedule()
     If historyWasHidden Then historySheet.Visible = xlSheetVisible
 
     On Error GoTo HistoryReadFailed
-    mStage = "assigning: reading lifetime counts"
-    Set totalCounts = LifetimeCounts(eligible)
-    mStage = "assigning: reading recent counts"
-    Set recentCounts = RecentCounts(eligible, DateAdd("m", -3, Date))
-    mStage = "assigning: reading location counts"
-    Set locationCounts = LifetimeLocationCounts(eligible)
-    mStage = "assigning: reading last-assignment dates"
-    Set lastAssigned = LastAssignmentDates(eligible)
-    mStage = "assigning: reading pairing history"
-    Set pairCounts = LifetimePairCounts()
+    LoadHistoryStatistics eligible, DateAdd("m", -3, Date), totalCounts, recentCounts, _
+                          locationCounts, lastAssigned, pairCounts
     On Error GoTo 0
 
     If historyWasHidden Then historySheet.Visible = xlSheetHidden
+
+    Set baseLocationCounts = CopyDictionary(locationCounts)
 
     mStage = "assigning: selecting the fairest mechanics"
     AssignSlotsGlobally slots, slotCount, eligible, totalCounts, recentCounts, _
                         locationCounts, lastAssigned, pairCounts
     mStage = "assigning: balancing the plan"
-    ImproveSchedule slots, slotCount, eligible, totalCounts, recentCounts, _
-                    locationCounts, lastAssigned, pairCounts
+    ImproveSchedule slots, slotCount, baseLocationCounts
     mStage = "assigning: writing the schedule"
     WriteSlotsToSchedule slots, slotCount
     mStage = "assigning: recording history"
@@ -407,23 +401,15 @@ Private Sub ApplyTemporaryAssignment(ByVal mechanic As String, ByRef slot As Sch
     locationCounts(mechanic & "|" & slot.Location) = CLng(locationCounts(mechanic & "|" & slot.Location)) + 1
     lastAssigned(mechanic) = slot.ScheduleDate
     partner = AssignedPartner(slot, slots, slotCount)
-    If Len(partner) > 0 Then pairCounts(PairKey(mechanic, partner)) = CLng(pairCounts(PairKey(mechanic, partner))) + 1
+    If Len(partner) > 0 Then Increment pairCounts, PairKey(mechanic, partner)
 End Sub
 
 ' Balancing pass: swaps two provisional assignments only when the full fairness
 ' objective decreases, repeatedly, until a complete pass finds no improvement.
 Private Sub ImproveSchedule(ByRef slots() As ScheduleSlot, ByVal slotCount As Long, _
-                            ByVal eligible As Collection, ByVal totalCounts As Object, _
-                            ByVal recentCounts As Object, ByVal locationCounts As Object, _
-                            ByVal lastAssigned As Object, ByVal pairCounts As Object)
+                            ByVal baseLocations As Object)
     Dim changed As Boolean, firstSlot As Long, secondSlot As Long
     Dim beforeScore As Double, afterScore As Double, firstMechanic As String, secondMechanic As String
-    Dim baseLocations As Object
-
-    ' Seed the improvement objective with lifetime location history so swaps
-    ' balance each mechanic across both locations over time, not only inside the
-    ' current batch. History has not been appended yet, so this is history-only.
-    Set baseLocations = LifetimeLocationCounts(eligible)
 
     Do
         changed = False
@@ -462,10 +448,10 @@ Private Function LocalFairnessScore(ByRef slots() As ScheduleSlot, ByVal slotCou
     Dim totals As Object, locations As Object, pairs As Object, seen As Object, index As Long
     Dim maxCount As Long, minCount As Long, mechanic As Variant, score As Double
     Dim key As Variant, oneCount As Long, twoCount As Long, personName As String
-    Set totals = CreateObject("Scripting.Dictionary")
-    Set locations = CreateObject("Scripting.Dictionary")
-    Set pairs = CreateObject("Scripting.Dictionary")
-    Set seen = CreateObject("Scripting.Dictionary")
+    Set totals = NewDictionary()
+    Set locations = NewDictionary()
+    Set pairs = NewDictionary()
+    Set seen = NewDictionary()
     For Each key In baseLocations.Keys
         locations(key) = CLng(baseLocations(key))
     Next key
@@ -504,7 +490,7 @@ Private Sub WriteSlotsToSchedule(ByRef slots() As ScheduleSlot, ByVal slotCount 
     Dim schedule As ListObject, index As Long, scheduleRow As ListRow
     Dim grouped As Object, key As Variant, cellValue As String
     Set schedule = GetTable("ScheduleTable")
-    Set grouped = CreateObject("Scripting.Dictionary")
+    Set grouped = NewDictionary()
     For index = 1 To slotCount
         key = CStr(slots(index).TableRow) & "|" & CStr(slots(index).TableColumn)
         If grouped.Exists(key) Then
@@ -557,6 +543,78 @@ End Sub
 
 ' Statistics -----------------------------------------------------------------
 
+' Reads History once and fills every statistic dictionary the assignment engine
+' needs. A single pass avoids repeated table access and name-collision bugs.
+Private Sub LoadHistoryStatistics(ByVal mechanics As Collection, ByVal recentCutoff As Date, _
+                                  ByRef outTotal As Object, ByRef outRecent As Object, _
+                                  ByRef outLocations As Object, ByRef outLastAssigned As Object, _
+                                  ByRef outPairs As Object)
+    Dim history As ListObject, row As ListRow, mechanic As Variant
+    Dim dateCol As Long, locationCol As Long, mechanicCol As Long
+    Dim name As String, scheduled As Date, groupKey As String, locationText As String
+    Dim pairGroups As Object, pairGroupKey As Variant
+    Dim peopleText As String, people() As String
+
+    Set outTotal = NewDictionary()
+    Set outRecent = NewDictionary()
+    Set outLocations = NewDictionary()
+    Set outLastAssigned = NewDictionary()
+    Set outPairs = NewDictionary()
+    Set pairGroups = NewDictionary()
+
+    For Each mechanic In mechanics
+        name = CStr(mechanic)
+        outTotal.Add name, 0
+        outRecent.Add name, 0
+        outLocations.Add name & "|" & LOCATION_ONE, 0
+        outLocations.Add name & "|" & LOCATION_TWO, 0
+        outLastAssigned.Add name, DateSerial(1900, 1, 1)
+    Next mechanic
+
+    Set history = GetTable("HistoryTable")
+    dateCol = GetColumnIndex(history, "Date")
+    locationCol = GetColumnIndex(history, "Location")
+    mechanicCol = GetColumnIndex(history, "Mechanic")
+
+    For Each row In history.ListRows
+        If Not IsDateValue(row.Range.Cells(1, dateCol).Value) Then GoTo ContinueHistoryRow
+        scheduled = CDate(row.Range.Cells(1, dateCol).Value)
+        name = TableCellText(row, mechanicCol)
+        If Len(name) = 0 Or Not outTotal.Exists(name) Then GoTo ContinueHistoryRow
+
+        outTotal(name) = CLng(outTotal(name)) + 1
+        If scheduled >= recentCutoff Then outRecent(name) = CLng(outRecent(name)) + 1
+
+        locationText = TableCellText(row, locationCol)
+        groupKey = name & "|" & locationText
+        If outLocations.Exists(groupKey) Then outLocations(groupKey) = CLng(outLocations(groupKey)) + 1
+
+        If scheduled > CDate(outLastAssigned(name)) Then outLastAssigned(name) = scheduled
+
+        groupKey = DateKey(scheduled) & "|" & locationText
+        If pairGroups.Exists(groupKey) Then
+            pairGroups(groupKey) = CStr(pairGroups(groupKey)) & "|" & name
+        Else
+            pairGroups.Add groupKey, name
+        End If
+ContinueHistoryRow:
+    Next row
+
+    For Each pairGroupKey In pairGroups.Keys
+        peopleText = CStr(pairGroups(pairGroupKey))
+        people = Split(peopleText, "|")
+        If UBound(people) - LBound(people) + 1 = 2 Then _
+            Increment outPairs, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people))))
+    Next pairGroupKey
+End Sub
+
+Private Function BuildLifetimeCounts(ByVal mechanics As Collection) As Object
+    Dim total As Object, recent As Object, locations As Object
+    Dim lastAssigned As Object, pairs As Object
+    LoadHistoryStatistics mechanics, DateSerial(1900, 1, 1), total, recent, locations, lastAssigned, pairs
+    Set BuildLifetimeCounts = total
+End Function
+
 Private Function ActiveMechanics() As Collection
     Dim mechanics As ListObject, row As ListRow, result As New Collection
     Set mechanics = GetTable("MechanicsTable")
@@ -567,86 +625,6 @@ Private Function ActiveMechanics() As Collection
         End If
     Next row
     Set ActiveMechanics = result
-End Function
-
-Private Function LifetimeCounts(ByVal mechanics As Collection) As Object
-    Set LifetimeCounts = HistoryStatistic(mechanics, "TOTAL", 0)
-End Function
-
-Private Function RecentCounts(ByVal mechanics As Collection, ByVal cutoffDate As Date) As Object
-    Set RecentCounts = HistoryStatistic(mechanics, "RECENT", cutoffDate)
-End Function
-
-Private Function LifetimeLocationCounts(ByVal mechanics As Collection) As Object
-    Dim result As Object, mechanic As Variant
-    Set result = CreateObject("Scripting.Dictionary")
-    For Each mechanic In mechanics
-        result.Add CStr(mechanic) & "|" & LOCATION_ONE, 0
-        result.Add CStr(mechanic) & "|" & LOCATION_TWO, 0
-    Next mechanic
-    AddHistoryToLocationCounts result
-    Set LifetimeLocationCounts = result
-End Function
-
-Private Function HistoryStatistic(ByVal mechanics As Collection, ByVal statisticType As String, ByVal cutoffDate As Date) As Object
-    Dim result As Object, mechanic As Variant, history As ListObject, row As ListRow, name As String
-    Set result = CreateObject("Scripting.Dictionary")
-    For Each mechanic In mechanics: result.Add CStr(mechanic), 0: Next mechanic
-    Set history = GetTable("HistoryTable")
-    For Each row In history.ListRows
-        name = Trim$(CStr(row.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value))
-        If result.Exists(name) Then
-            If statisticType = "TOTAL" Or row.Range.Cells(1, GetColumnIndex(history, "Date")).Value >= cutoffDate Then
-                result(name) = CLng(result(name)) + 1
-            End If
-        End If
-    Next row
-    Set HistoryStatistic = result
-End Function
-
-Private Function LastAssignmentDates(ByVal mechanics As Collection) As Object
-    Dim result As Object, mechanic As Variant, history As ListObject, row As ListRow, name As String, scheduled As Date
-    Set result = CreateObject("Scripting.Dictionary")
-    For Each mechanic In mechanics: result.Add CStr(mechanic), DateSerial(1900, 1, 1): Next mechanic
-    Set history = GetTable("HistoryTable")
-    For Each row In history.ListRows
-        name = Trim$(CStr(row.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value))
-        If result.Exists(name) And IsDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value) Then
-            scheduled = CDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value)
-            If scheduled > CDate(result(name)) Then result(name) = scheduled
-        End If
-    Next row
-    Set LastAssignmentDates = result
-End Function
-
-Private Function LifetimePairCounts() As Object
-    Dim result As Object, grouped As Object, history As ListObject, row As ListRow
-    Dim groupKey As String, mechanic As String, pair As Variant
-    Dim peopleText As String, people() As String
-    Set result = CreateObject("Scripting.Dictionary")
-    Set grouped = CreateObject("Scripting.Dictionary")
-    Set history = GetTable("HistoryTable")
-    For Each row In history.ListRows
-        If IsDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value) Then
-            mechanic = Trim$(CStr(row.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value))
-            If Len(mechanic) > 0 Then
-                groupKey = DateKey(CDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value)) & "|" & _
-                           CStr(row.Range.Cells(1, GetColumnIndex(history, "Location")).Value)
-                If grouped.Exists(groupKey) Then
-                    grouped(groupKey) = CStr(grouped(groupKey)) & "|" & mechanic
-                Else
-                    grouped.Add groupKey, mechanic
-                End If
-            End If
-        End If
-    Next row
-    For Each pair In grouped.Keys
-        peopleText = CStr(grouped(pair))
-        people = Split(peopleText, "|")
-        If UBound(people) - LBound(people) + 1 = 2 Then _
-            Increment result, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people))))
-    Next pair
-    Set LifetimePairCounts = result
 End Function
 
 ' Helpers --------------------------------------------------------------------
@@ -707,7 +685,7 @@ Private Function IsUnavailable(ByVal mechanic As String, ByVal scheduleDate As D
     Set availability = GetTable("AvailabilityTable")
     For Each row In availability.ListRows
         If StrComp(Trim$(CStr(row.Range.Cells(1, GetColumnIndex(availability, "Mechanic")).Value)), mechanic, vbTextCompare) = 0 _
-           And IsDate(row.Range.Cells(1, GetColumnIndex(availability, "Date")).Value) Then
+           And IsDateValue(row.Range.Cells(1, GetColumnIndex(availability, "Date")).Value) Then
             If CDate(row.Range.Cells(1, GetColumnIndex(availability, "Date")).Value) = scheduleDate Then
                 IsUnavailable = True
                 Exit Function
@@ -785,37 +763,54 @@ Private Sub Increment(ByVal dictionary As Object, ByVal key As String)
     If dictionary.Exists(key) Then dictionary(key) = CLng(dictionary(key)) + 1 Else dictionary.Add key, 1
 End Sub
 
-Private Sub AddHistoryToLocationCounts(ByVal locationCounts As Object)
-    Dim history As ListObject, row As ListRow, key As String
-    Set history = GetTable("HistoryTable")
-    For Each row In history.ListRows
-        key = Trim$(CStr(row.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value)) & "|" & _
-              Trim$(CStr(row.Range.Cells(1, GetColumnIndex(history, "Location")).Value))
-        If locationCounts.Exists(key) Then locationCounts(key) = CLng(locationCounts(key)) + 1
-    Next row
-End Sub
+Private Function NewDictionary() As Object
+    Set NewDictionary = CreateObject("Scripting.Dictionary")
+    If NewDictionary Is Nothing Then _
+        Err.Raise vbObjectError + 112, , "Scripting.Dictionary is not available. Use Microsoft Excel for Windows."
+End Function
 
-Private Function ExistingScheduleDates(ByVal schedule As ListObject, ByVal dateIndex As Long) As Object
-    Dim result As Object, row As ListRow
-    Set result = CreateObject("Scripting.Dictionary")
-    For Each row In schedule.ListRows
-        If IsDate(row.Range.Cells(1, dateIndex).Value) Then result(DateKey(CDate(row.Range.Cells(1, dateIndex).Value))) = True
-    Next row
-    Set ExistingScheduleDates = result
+Private Function CopyDictionary(ByVal source As Object) As Object
+    Dim result As Object, key As Variant
+    Set result = NewDictionary()
+    For Each key In source.Keys
+        result(CStr(key)) = source(key)
+    Next key
+    Set CopyDictionary = result
+End Function
+
+Private Function IsDateValue(ByVal value As Variant) As Boolean
+    IsDateValue = (Not IsEmpty(value)) And (Not IsNull(value)) And IsDate(value)
+End Function
+
+Private Function TableCellText(ByVal row As ListRow, ByVal columnIndex As Long) As String
+    TableCellText = Trim$(CStr(row.Range.Cells(1, columnIndex).Value))
 End Function
 
 Private Function HistoryKeys(ByVal history As ListObject) As Object
     Dim result As Object, row As ListRow, key As String
-    Set result = CreateObject("Scripting.Dictionary")
+    Dim dateCol As Long, locationCol As Long, mechanicCol As Long
+    Set result = NewDictionary()
+    dateCol = GetColumnIndex(history, "Date")
+    locationCol = GetColumnIndex(history, "Location")
+    mechanicCol = GetColumnIndex(history, "Mechanic")
     For Each row In history.ListRows
-        If IsDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value) Then
-            key = DateKey(CDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value)) & "|" & _
-                  CStr(row.Range.Cells(1, GetColumnIndex(history, "Location")).Value) & "|" & _
-                  CStr(row.Range.Cells(1, GetColumnIndex(history, "Mechanic")).Value)
+        If IsDateValue(row.Range.Cells(1, dateCol).Value) Then
+            key = DateKey(CDate(row.Range.Cells(1, dateCol).Value)) & "|" & _
+                  TableCellText(row, locationCol) & "|" & TableCellText(row, mechanicCol)
             result(key) = True
         End If
     Next row
     Set HistoryKeys = result
+End Function
+
+Private Function ExistingScheduleDates(ByVal schedule As ListObject, ByVal dateIndex As Long) As Object
+    Dim result As Object, row As ListRow
+    Set result = NewDictionary()
+    For Each row In schedule.ListRows
+        If IsDateValue(row.Range.Cells(1, dateIndex).Value) Then _
+            result(DateKey(CDate(row.Range.Cells(1, dateIndex).Value))) = True
+    Next row
+    Set ExistingScheduleDates = result
 End Function
 
 Private Function FirstEmptyScheduleRow(ByVal schedule As ListObject, ByVal dateIndex As Long) As ListRow
@@ -935,7 +930,7 @@ Private Sub UpdateFairnessSummary()
     Dim mean As Double, sumSq As Double, stdev As Double, gap As Long
 
     Set eligible = ActiveMechanics()
-    Set counts = LifetimeCounts(eligible)
+    Set counts = BuildLifetimeCounts(eligible)
     n = 0
     total = 0
     maxCount = 0
@@ -984,7 +979,7 @@ Private Function VerifyGeneratedSchedule() As String
     Dim parts() As String, i As Long, name As String
 
     Set eligible = ActiveMechanics()
-    Set activeSet = CreateObject("Scripting.Dictionary")
+    Set activeSet = NewDictionary()
     For Each mechanic In eligible
         activeSet(CStr(mechanic)) = True
     Next mechanic
@@ -997,7 +992,7 @@ Private Function VerifyGeneratedSchedule() As String
     For Each row In schedule.ListRows
         If IsFutureScheduleDate(row.Range.Cells(1, dateIndex).Value) Then
             scheduleDate = CDate(row.Range.Cells(1, dateIndex).Value)
-            Set peopleToday = CreateObject("Scripting.Dictionary")
+            Set peopleToday = NewDictionary()
             For Each colIndex In Array(firstLocationIndex, secondLocationIndex)
                 cellValue = Trim$(CStr(row.Range.Cells(1, CLng(colIndex)).Value))
                 If Len(cellValue) = 0 Then
