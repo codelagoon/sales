@@ -230,8 +230,8 @@ Private Sub AssignFutureSchedule()
     If historyWasHidden Then historySheet.Visible = xlSheetVisible
 
     On Error GoTo HistoryReadFailed
-    LoadHistoryStatistics eligible, DateAdd("m", -3, Date), totalCounts, recentCounts, _
-                          locationCounts, lastAssigned, pairCounts
+    Call LoadHistoryStatistics(eligible, DateAdd("m", -3, Date), totalCounts, recentCounts, _
+                               locationCounts, lastAssigned, pairCounts)
     On Error GoTo 0
 
     If historyWasHidden Then historySheet.Visible = xlSheetHidden
@@ -401,7 +401,7 @@ Private Sub ApplyTemporaryAssignment(ByVal mechanic As String, ByRef slot As Sch
     locationCounts(mechanic & "|" & slot.Location) = CLng(locationCounts(mechanic & "|" & slot.Location)) + 1
     lastAssigned(mechanic) = slot.ScheduleDate
     partner = AssignedPartner(slot, slots, slotCount)
-    If Len(partner) > 0 Then Increment pairCounts, PairKey(mechanic, partner)
+    If Len(partner) > 0 Then Call Increment(pairCounts, PairKey(mechanic, partner))
 End Sub
 
 ' Balancing pass: swaps two provisional assignments only when the full fairness
@@ -456,10 +456,10 @@ Private Function LocalFairnessScore(ByRef slots() As ScheduleSlot, ByVal slotCou
         locations(key) = CLng(baseLocations(key))
     Next key
     For index = 1 To slotCount
-        Increment totals, slots(index).Mechanic
-        Increment locations, slots(index).Mechanic & "|" & slots(index).Location
+        Call Increment(totals, slots(index).Mechanic)
+        Call Increment(locations, slots(index).Mechanic & "|" & slots(index).Location)
         If Len(AssignedPartner(slots(index), slots, slotCount)) > 0 Then _
-            Increment pairs, PairKey(slots(index).Mechanic, AssignedPartner(slots(index), slots, slotCount))
+            Call Increment(pairs, PairKey(slots(index).Mechanic, AssignedPartner(slots(index), slots, slotCount)))
         score = score + ConsecutiveDatePenalty(slots(index).Mechanic, slots(index).ScheduleDate, slots, slotCount) * 1000#
     Next index
     minCount = 2147483647
@@ -604,14 +604,14 @@ ContinueHistoryRow:
         peopleText = CStr(pairGroups(pairGroupKey))
         people = Split(peopleText, "|")
         If UBound(people) - LBound(people) + 1 = 2 Then _
-            Increment outPairs, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people))))
+            Call Increment(outPairs, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people)))))
     Next pairGroupKey
 End Sub
 
 Private Function BuildLifetimeCounts(ByVal mechanics As Collection) As Object
     Dim total As Object, recent As Object, locations As Object
     Dim lastAssigned As Object, pairs As Object
-    LoadHistoryStatistics mechanics, DateSerial(1900, 1, 1), total, recent, locations, lastAssigned, pairs
+    Call LoadHistoryStatistics(mechanics, DateSerial(1900, 1, 1), total, recent, locations, lastAssigned, pairs)
     Set BuildLifetimeCounts = total
 End Function
 
