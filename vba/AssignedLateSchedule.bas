@@ -326,6 +326,7 @@ Private Function BuildSelectionNote(ByVal mechanic As String, ByRef slot As Sche
                                     ByVal slotCount As Long) As String
     Dim lifetime As Long, recent As Long, idle As String, pairText As String
     Dim partner As String, repeats As Long, locationGap As Long, daysSince As Long
+    Dim pairName As String
     lifetime = CLng(totalCounts(mechanic))
     recent = CLng(recentCounts(mechanic))
     If CDate(lastAssigned(mechanic)) <= DateSerial(1900, 1, 1) Then
@@ -334,10 +335,11 @@ Private Function BuildSelectionNote(ByVal mechanic As String, ByRef slot As Sche
         daysSince = WorksheetFunction.Max(0, DateDiff("d", CDate(lastAssigned(mechanic)), slot.ScheduleDate))
         idle = daysSince & "d"
     End If
-    partner = AssignedPartner(slot, slots, slotCount)
+    partner = AssignedPartner(slot.ScheduleDate, slot.Location, mechanic, slots, slotCount)
     If Len(partner) > 0 Then
+        pairName = MechanicPairKey(mechanic, partner)
         repeats = 0
-        If pairCounts.Exists(PairKey(mechanic, partner)) Then repeats = CLng(pairCounts(PairKey(mechanic, partner)))
+        If pairCounts.Exists(pairName) Then repeats = CLng(pairCounts(pairName))
         If repeats = 0 Then
             pairText = "new pairing w/ " & partner
         Else
@@ -366,7 +368,7 @@ Private Function AssignmentScore(ByVal mechanic As String, ByRef slot As Schedul
     recent = CLng(recentCounts(mechanic))
     daysSince = DaysSinceLastAssignment(lastAssigned(mechanic), slot.ScheduleDate)
     locationGap = LocationImbalanceAfter(mechanic, slot.Location, locationCounts)
-    GetCountSpreadAfter mechanic, totalCounts, maximumAfterAssignment, minimumAfterAssignment
+    Call GetCountSpreadAfter(mechanic, totalCounts, maximumAfterAssignment, minimumAfterAssignment)
     consecutivePenalty = ConsecutiveDatePenalty(mechanic, slot.ScheduleDate, slots, slotCount)
     pairPenalty = PairRepeatPenalty(mechanic, slot, slots, slotCount, pairCounts)
 
@@ -395,13 +397,16 @@ Private Sub ApplyTemporaryAssignment(ByVal mechanic As String, ByRef slot As Sch
                                      ByVal totalCounts As Object, ByVal recentCounts As Object, _
                                      ByVal locationCounts As Object, ByVal lastAssigned As Object, _
                                      ByVal pairCounts As Object, ByRef slots() As ScheduleSlot, ByVal slotCount As Long)
-    Dim partner As String
+    Dim partner As String, pairName As String
     totalCounts(mechanic) = CLng(totalCounts(mechanic)) + 1
     recentCounts(mechanic) = CLng(recentCounts(mechanic)) + 1
     locationCounts(mechanic & "|" & slot.Location) = CLng(locationCounts(mechanic & "|" & slot.Location)) + 1
     lastAssigned(mechanic) = slot.ScheduleDate
-    partner = AssignedPartner(slot, slots, slotCount)
-    If Len(partner) > 0 Then Call Increment(pairCounts, PairKey(mechanic, partner))
+    partner = AssignedPartner(slot.ScheduleDate, slot.Location, mechanic, slots, slotCount)
+    If Len(partner) > 0 Then
+        pairName = MechanicPairKey(mechanic, partner)
+        Call Increment(pairCounts, pairName)
+    End If
 End Sub
 
 ' Balancing pass: swaps two provisional assignments only when the full fairness
@@ -448,6 +453,7 @@ Private Function LocalFairnessScore(ByRef slots() As ScheduleSlot, ByVal slotCou
     Dim totals As Object, locations As Object, pairs As Object, seen As Object, index As Long
     Dim maxCount As Long, minCount As Long, mechanic As Variant, score As Double
     Dim key As Variant, oneCount As Long, twoCount As Long, personName As String
+    Dim partnerName As String, pairName As String
     Set totals = NewDictionary()
     Set locations = NewDictionary()
     Set pairs = NewDictionary()
@@ -458,8 +464,12 @@ Private Function LocalFairnessScore(ByRef slots() As ScheduleSlot, ByVal slotCou
     For index = 1 To slotCount
         Call Increment(totals, slots(index).Mechanic)
         Call Increment(locations, slots(index).Mechanic & "|" & slots(index).Location)
-        If Len(AssignedPartner(slots(index), slots, slotCount)) > 0 Then _
-            Call Increment(pairs, PairKey(slots(index).Mechanic, AssignedPartner(slots(index), slots, slotCount)))
+        partnerName = AssignedPartner(slots(index).ScheduleDate, slots(index).Location, _
+                                      slots(index).Mechanic, slots, slotCount)
+        If Len(partnerName) > 0 Then
+            pairName = MechanicPairKey(slots(index).Mechanic, partnerName)
+            Call Increment(pairs, pairName)
+        End If
         score = score + ConsecutiveDatePenalty(slots(index).Mechanic, slots(index).ScheduleDate, slots, slotCount) * 1000#
     Next index
     minCount = 2147483647
@@ -554,6 +564,7 @@ Private Sub LoadHistoryStatistics(ByVal mechanics As Collection, ByVal recentCut
     Dim name As String, scheduled As Date, groupKey As String, locationText As String
     Dim pairGroups As Object, pairGroupKey As Variant
     Dim peopleText As String, people() As String
+    Dim firstPerson As String, secondPerson As String, pairName As String
 
     Set outTotal = NewDictionary()
     Set outRecent = NewDictionary()
@@ -603,8 +614,12 @@ ContinueHistoryRow:
     For Each pairGroupKey In pairGroups.Keys
         peopleText = CStr(pairGroups(pairGroupKey))
         people = Split(peopleText, "|")
-        If UBound(people) - LBound(people) + 1 = 2 Then _
-            Call Increment(outPairs, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people)))))
+        If UBound(people) - LBound(people) + 1 = 2 Then
+            firstPerson = Trim$(people(LBound(people)))
+            secondPerson = Trim$(people(UBound(people)))
+            pairName = MechanicPairKey(firstPerson, secondPerson)
+            Call Increment(outPairs, pairName)
+        End If
     Next pairGroupKey
 End Sub
 
@@ -694,11 +709,13 @@ Private Function IsUnavailable(ByVal mechanic As String, ByVal scheduleDate As D
     Next row
 End Function
 
-Private Function AssignedPartner(ByRef slot As ScheduleSlot, ByRef slots() As ScheduleSlot, ByVal slotCount As Long) As String
+Private Function AssignedPartner(ByVal scheduleDate As Date, ByVal location As String, _
+                                 ByVal mechanic As String, ByRef slots() As ScheduleSlot, _
+                                 ByVal slotCount As Long) As String
     Dim index As Long
     For index = 1 To slotCount
-        If slots(index).ScheduleDate = slot.ScheduleDate And slots(index).Location = slot.Location _
-           And slots(index).Mechanic <> slot.Mechanic And Len(slots(index).Mechanic) > 0 Then
+        If slots(index).ScheduleDate = scheduleDate And slots(index).Location = location _
+           And slots(index).Mechanic <> mechanic And Len(slots(index).Mechanic) > 0 Then
             AssignedPartner = slots(index).Mechanic
             Exit Function
         End If
@@ -720,10 +737,12 @@ End Function
 
 Private Function PairRepeatPenalty(ByVal mechanic As String, ByRef slot As ScheduleSlot, _
                                    ByRef slots() As ScheduleSlot, ByVal slotCount As Long, ByVal pairCounts As Object) As Long
-    Dim partner As String
-    partner = AssignedPartner(slot, slots, slotCount)
-    If Len(partner) > 0 And pairCounts.Exists(PairKey(mechanic, partner)) Then _
-        PairRepeatPenalty = CLng(pairCounts(PairKey(mechanic, partner)))
+    Dim partner As String, pairName As String
+    partner = AssignedPartner(slot.ScheduleDate, slot.Location, mechanic, slots, slotCount)
+    If Len(partner) > 0 Then
+        pairName = MechanicPairKey(mechanic, partner)
+        If pairCounts.Exists(pairName) Then PairRepeatPenalty = CLng(pairCounts(pairName))
+    End If
 End Function
 
 Private Function LocationImbalanceAfter(ByVal mechanic As String, ByVal location As String, ByVal locationCounts As Object) As Long
@@ -903,11 +922,11 @@ Private Function DateKey(ByVal value As Date) As String
     DateKey = Format$(value, "yyyymmdd")
 End Function
 
-Private Function PairKey(ByVal firstMechanic As String, ByVal secondMechanic As String) As String
+Private Function MechanicPairKey(ByVal firstMechanic As String, ByVal secondMechanic As String) As String
     If StrComp(firstMechanic, secondMechanic, vbTextCompare) < 0 Then
-        PairKey = firstMechanic & "|" & secondMechanic
+        MechanicPairKey = firstMechanic & "|" & secondMechanic
     Else
-        PairKey = secondMechanic & "|" & firstMechanic
+        MechanicPairKey = secondMechanic & "|" & firstMechanic
     End If
 End Function
 
