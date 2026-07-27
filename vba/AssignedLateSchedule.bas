@@ -4,6 +4,8 @@ Option Explicit
 ' Assigned Late Schedule
 ' Import this module into the workbook's VBA project.  All addresses are
 ' resolved through workbook tables and names so the paper layout can move.
+' Target platform: Microsoft Excel for Windows (.xlsm).  Mac Excel is not
+' supported (Scripting.Dictionary and other COM features are required).
 
 Private Const LOCATION_ONE As String = "1 Centre Street"
 Private Const LOCATION_TWO As String = "100 Centre Street"
@@ -26,6 +28,7 @@ End Type
 ' permanently record the resulting assignments.
 Public Sub GenerateSchedule()
     Dim verificationLog As String
+    If Not RequireWindowsExcel() Then Exit Sub
     On Error GoTo HandleError
     Application.ScreenUpdating = False
     Application.EnableEvents = False
@@ -60,6 +63,7 @@ End Sub
 
 ' Generates only missing schedule dates from the three settings on Schedule.
 Public Sub GenerateDates()
+    If Not RequireWindowsExcel() Then Exit Sub
     On Error GoTo HandleError
     Application.ScreenUpdating = False
     GenerateDatesInternal
@@ -78,6 +82,8 @@ Public Sub ClearFutureSchedule()
     Dim schedule As ListObject, scheduleRow As ListRow
     Dim dateIndex As Long, firstLocationIndex As Long, secondLocationIndex As Long
     Dim cleared As Long
+
+    If Not RequireWindowsExcel() Then Exit Sub
 
     If MsgBox("Clear assignments for future dates only? History will be kept.", _
               vbQuestion + vbYesNo, "Clear Future Schedule") <> vbYes Then Exit Sub
@@ -99,6 +105,7 @@ End Sub
 
 ' Formats the familiar paper schedule as a single printable page where possible.
 Public Sub PrintSchedule()
+    If Not RequireWindowsExcel() Then Exit Sub
     On Error GoTo HandleError
     PrepareScheduleForPrinting
     GetSheet("Schedule").PrintOut
@@ -622,6 +629,19 @@ Private Function LifetimePairCounts() As Object
 End Function
 
 ' Helpers --------------------------------------------------------------------
+
+' Mac Excel does not provide Scripting.Dictionary and related COM support.
+Private Function RequireWindowsExcel() As Boolean
+    If InStr(1, Application.OperatingSystem, "Mac", vbTextCompare) > 0 Then
+        MsgBox "This workbook requires Microsoft Excel for Windows." & vbCrLf & vbCrLf & _
+               "Excel for Mac is not supported. The scheduling engine relies on " & _
+               "Windows-only VBA features (for example Scripting.Dictionary).", _
+               vbExclamation, "Windows Excel required"
+        RequireWindowsExcel = False
+    Else
+        RequireWindowsExcel = True
+    End If
+End Function
 
 Private Function CollectEmptyFutureSlots(ByRef slots() As ScheduleSlot) As Long
     Dim schedule As ListObject, row As ListRow, rowNumber As Long, index As Long, count As Long

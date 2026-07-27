@@ -14,6 +14,13 @@ The supervisor workflow is intentionally tiny:
 Everything else — date generation, fair assignment, location/pair rotation, and
 the permanent fairness history — happens automatically.
 
+## Requirements
+
+- **Microsoft Excel for Windows** (desktop `.xlsm` with macros enabled)
+- **Not supported:** Excel for Mac — the scheduling engine uses Windows-only VBA
+  features (`Scripting.Dictionary` and related COM). On Mac, the buttons will
+  show a clear message instead of running.
+
 ## Worksheets
 
 | Sheet | Purpose |

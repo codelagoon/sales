@@ -6,6 +6,10 @@ The product is a single self-contained, macro-enabled Excel workbook,
 `Assigned Late Schedule.xlsm`, generated from source. There is no server or web
 app. See `README.md` for the full description and commands.
 
+**Runtime target:** Microsoft Excel for Windows only. Do not attempt Mac Excel
+compatibility unless explicitly requested — the VBA engine depends on
+`Scripting.Dictionary` and other Windows COM features.
+
 - `build_workbook.py` — builds the workbook layout with XlsxWriter and embeds
   `assets/vbaProject.bin`.
 - `vba/AssignedLateSchedule.bas` — the VBA (date generation, fairness optimizer,
