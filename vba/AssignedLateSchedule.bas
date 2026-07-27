@@ -212,6 +212,7 @@ Private Sub AssignFutureSchedule()
     Dim slotCount As Long
     Dim totalCounts As Object, recentCounts As Object, locationCounts As Object
     Dim lastAssigned As Object, pairCounts As Object
+    Dim historySheet As Worksheet, historyWasHidden As Boolean
 
     mStage = "assigning: reading the mechanics list"
     Set eligible = ActiveMechanics()
@@ -223,11 +224,24 @@ Private Sub AssignFutureSchedule()
     If slotCount = 0 Then Exit Sub
 
     mStage = "assigning: reading history statistics"
+    Set historySheet = GetTable("HistoryTable").Parent
+    historyWasHidden = (historySheet.Visible <> xlSheetVisible)
+    If historyWasHidden Then historySheet.Visible = xlSheetVisible
+
+    On Error GoTo HistoryReadFailed
+    mStage = "assigning: reading lifetime counts"
     Set totalCounts = LifetimeCounts(eligible)
+    mStage = "assigning: reading recent counts"
     Set recentCounts = RecentCounts(eligible, DateAdd("m", -3, Date))
+    mStage = "assigning: reading location counts"
     Set locationCounts = LifetimeLocationCounts(eligible)
+    mStage = "assigning: reading last-assignment dates"
     Set lastAssigned = LastAssignmentDates(eligible)
+    mStage = "assigning: reading pairing history"
     Set pairCounts = LifetimePairCounts()
+    On Error GoTo 0
+
+    If historyWasHidden Then historySheet.Visible = xlSheetHidden
 
     mStage = "assigning: selecting the fairest mechanics"
     AssignSlotsGlobally slots, slotCount, eligible, totalCounts, recentCounts, _
@@ -239,6 +253,11 @@ Private Sub AssignFutureSchedule()
     WriteSlotsToSchedule slots, slotCount
     mStage = "assigning: recording history"
     CommitAssignmentToHistory slots, slotCount
+    Exit Sub
+
+HistoryReadFailed:
+    If historyWasHidden Then historySheet.Visible = xlSheetHidden
+    Err.Raise Err.Number, Err.Source, Err.Description
 End Sub
 
 ' Selects the next assignment from every remaining date/location rather than
@@ -602,7 +621,8 @@ End Function
 
 Private Function LifetimePairCounts() As Object
     Dim result As Object, grouped As Object, history As ListObject, row As ListRow
-    Dim groupKey As String, mechanic As String, pair As Variant, people As Collection
+    Dim groupKey As String, mechanic As String, pair As Variant
+    Dim peopleText As String, people() As String
     Set result = CreateObject("Scripting.Dictionary")
     Set grouped = CreateObject("Scripting.Dictionary")
     Set history = GetTable("HistoryTable")
@@ -613,17 +633,18 @@ Private Function LifetimePairCounts() As Object
                 groupKey = DateKey(CDate(row.Range.Cells(1, GetColumnIndex(history, "Date")).Value)) & "|" & _
                            CStr(row.Range.Cells(1, GetColumnIndex(history, "Location")).Value)
                 If grouped.Exists(groupKey) Then
-                    grouped(groupKey).Add mechanic
+                    grouped(groupKey) = CStr(grouped(groupKey)) & "|" & mechanic
                 Else
-                    Set people = New Collection
-                    people.Add mechanic
-                    grouped.Add groupKey, people
+                    grouped.Add groupKey, mechanic
                 End If
             End If
         End If
     Next row
     For Each pair In grouped.Keys
-        If grouped(pair).Count = 2 Then Increment result, PairKey(grouped(pair)(1), grouped(pair)(2))
+        peopleText = CStr(grouped(pair))
+        people = Split(peopleText, "|")
+        If UBound(people) - LBound(people) + 1 = 2 Then _
+            Increment result, PairKey(Trim$(people(LBound(people))), Trim$(people(UBound(people))))
     Next pair
     Set LifetimePairCounts = result
 End Function
