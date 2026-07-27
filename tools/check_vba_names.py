@@ -1,8 +1,8 @@
 """Static checks for VBA pitfalls that cause cryptic Excel compile/runtime errors.
 
 1. Case-insensitive Dim/procedure name collisions (runtime error 91).
-2. Sub calls without ``Call`` that pass a user function with arguments
-   (compile error: "Argument not optional").
+2. Statement-style Sub calls that pass a user-defined Function with arguments
+   without ``Call`` (compile error: "Argument not optional").
 """
 
 from __future__ import annotations
@@ -15,19 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 VBA_FILE = ROOT / "vba" / "AssignedLateSchedule.bas"
 
 DIM_RE = re.compile(r"^\s*Dim\s+(.+)$", re.IGNORECASE)
-FUNCTION_RE = re.compile(r"^\s*(?:Public|Private)?\s*(?:Sub|Function)\s+(\w+)", re.IGNORECASE)
-
-# Statement-style Sub call whose argument list contains FuncName(...).
-# Example that fails to compile:  Increment dict, PairKey(a, b)
-BAD_SUB_CALL_RE = re.compile(
-    r"(?im)^(?!\s*(?:If\b.*\bThen\s+)?Call\b)"  # not already using Call
-    r"(?:\s*(?:If\b.+\bThen))?.*"
-    r"\b(?P<sub>Increment|LoadHistoryStatistics|AssignSlotsGlobally|ImproveSchedule|"
-    r"WriteSlotsToSchedule|CommitAssignmentToHistory|ApplyTemporaryAssignment|"
-    r"GetCountSpreadAfter|RemoveUnusedFutureBlankDates|SortScheduleByDate|"
-    r"SetNamedValue|CheckActiveStaffThreshold)\b"
-    r"[^(=\n]*,\s*"
-    r"(?P<fn>[A-Za-z_]\w*)\s*\("
+PROC_RE = re.compile(r"^\s*(?:Public|Private)?\s*(?:Sub|Function)\s+(\w+)", re.IGNORECASE)
+FUNCTION_DEF_RE = re.compile(
+    r"^\s*(?:Public|Private)?\s*Function\s+(\w+)", re.IGNORECASE
 )
 
 
@@ -45,7 +35,7 @@ def find_collisions(text: str) -> list[str]:
     variables: set[str] = set()
 
     for line in text.splitlines():
-        fn = FUNCTION_RE.match(line)
+        fn = PROC_RE.match(line)
         if fn:
             procedures.add(fn.group(1).lower())
             continue
@@ -57,25 +47,49 @@ def find_collisions(text: str) -> list[str]:
     return sorted(variables & procedures)
 
 
-def find_bad_sub_calls(text: str) -> list[str]:
-    # Join continued lines so "Then _\n    Increment ..." is visible as one statement.
+def find_bad_sub_calls(text: str, user_functions: set[str]) -> list[str]:
+    """Flag ``SubName arg, UserFunc(...)`` without Call.
+
+    VBA mis-parses nested user-function calls in statement-style Sub invocations
+    and raises compile error "Argument not optional".
+    """
     joined = re.sub(r"_\s*\n\s*", " ", text)
-    hits = []
-    for match in BAD_SUB_CALL_RE.finditer(joined):
-        # Skip if the function name is actually Call already handled; keep report short.
-        snippet = match.group(0).strip()
-        if re.search(r"\bCall\s+" + re.escape(match.group("sub")), snippet, re.I):
+    hits: list[str] = []
+    # Match statement-style calls (no Call keyword) that include UserFunc(...).
+    pattern = re.compile(
+        r"(?im)(?:^|\bThen\s+)"
+        r"(?!Call\b)"
+        r"(?P<sub>[A-Za-z_]\w*)\b"
+        r"(?!\s*=)"  # not an assignment
+        r"[^\n]*?"
+        r",\s*(?P<fn>[A-Za-z_]\w*)\s*\("
+    )
+    for match in pattern.finditer(joined):
+        sub = match.group("sub")
+        fn = match.group("fn")
+        if sub.lower() in {"if", "for", "do", "while", "select", "with", "elseif"}:
+            continue
+        if fn.lower() not in user_functions:
+            continue
+        # Ignore if this was already a Call statement (Call SubName(...)).
+        window_start = max(0, match.start() - 10)
+        prefix = joined[window_start : match.start()]
+        if re.search(r"\bCall\s+$", prefix, re.I):
             continue
         hits.append(
-            f"{match.group('sub')} ..., {match.group('fn')}(...)  -> use Call {match.group('sub')}(..., {match.group('fn')}(...))"
+            f"{sub} ..., {fn}(...)  -> use Call {sub}(..., {fn}(...))"
         )
     return hits
 
 
 def main() -> int:
     text = VBA_FILE.read_text(encoding="utf-8")
+    user_functions = {
+        m.group(1).lower() for m in FUNCTION_DEF_RE.finditer(text)
+    }
+
     collisions = find_collisions(text)
-    bad_calls = find_bad_sub_calls(text)
+    bad_calls = find_bad_sub_calls(text, user_functions)
     failed = False
 
     if collisions:

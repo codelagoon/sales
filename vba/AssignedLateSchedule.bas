@@ -298,8 +298,8 @@ Private Sub AssignSlotsGlobally(ByRef slots() As ScheduleSlot, ByVal slotCount A
                                                   recentCounts, locationCounts, lastAssigned, _
                                                   pairCounts, slots, slotCount)
         slots(bestSlot).Mechanic = bestMechanic
-        ApplyTemporaryAssignment bestMechanic, slots(bestSlot), totalCounts, recentCounts, _
-                                 locationCounts, lastAssigned, pairCounts, slots, slotCount
+        Call ApplyTemporaryAssignment(bestMechanic, slots(bestSlot), totalCounts, recentCounts, _
+                                      locationCounts, lastAssigned, pairCounts, slots, slotCount)
     Next assigned
 End Sub
 
@@ -955,10 +955,10 @@ Private Sub UpdateFairnessSummary()
         stdev = Sqr(sumSq / n)
     End If
 
-    SetNamedValue "FairnessActiveCount", n
-    SetNamedValue "FairnessTotal", total
-    SetNamedValue "FairnessGap", gap
-    SetNamedValue "FairnessStdDev", Round(stdev, 3)
+    Call SetNamedValue("FairnessActiveCount", n)
+    Call SetNamedValue("FairnessTotal", total)
+    Call SetNamedValue("FairnessGap", gap)
+    Call SetNamedValue("FairnessStdDev", Round(stdev, 3))
 End Sub
 
 Private Sub SetNamedValue(ByVal nameText As String, ByVal value As Variant)
